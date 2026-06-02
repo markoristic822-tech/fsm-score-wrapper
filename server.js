@@ -125,16 +125,17 @@ function extractOrgLevel(personWrapper) {
   const rawOrgLevel =
     person.orgLevel ||
     person.orgLevelId ||
+    person.orgLevelIds?.[0] ||
+    person.orgLevels?.[0] ||
     person.organizationLevel ||
     person.organizationLevelId ||
+    person.organizationLevelIds?.[0] ||
     person.organizationalLevel ||
     person.organization ||
-    person.orgLevels?.[0] ||
     person.regions?.[0];
 
   return normalizeOrgLevel(rawOrgLevel);
 }
-
 app.get("/health", (req, res) => {
   res.json({
     status: "ok",
