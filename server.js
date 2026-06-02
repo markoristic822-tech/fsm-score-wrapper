@@ -231,9 +231,12 @@ app.post("/score-with-org-level", async (req, res) => {
   }
 });
 
-const server = app.listen(Number(PORT), "127.0.0.1", () => {
-  console.log(`FSM score wrapper running on port ${PORT}`);
-  console.log(`Health check: http://localhost:${PORT}/health`);
+const host = process.env.HOST || "0.0.0.0";
+const port = Number(PORT);
+
+const server = app.listen(port, host, () => {
+  console.log(`FSM score wrapper running on ${host}:${port}`);
+  console.log(`Health check: /health`);
 });
 
 server.on("error", (error) => {
