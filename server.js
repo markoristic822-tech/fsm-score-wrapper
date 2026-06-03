@@ -288,20 +288,41 @@ app.post("/score-with-org-level", async (req, res) => {
       });
     }
 
-    const enrichedResponse = {
-      ...scoreData,
-      generatedSlots,
-      results: scoreData.results.map((item, index) => {
-        if (index === 0) {
-          return {
-            ...item,
-            orgLevel
-          };
-        }
+    const availableResults = Array.isArray(scoreData.results)
+  ? scoreData.results.filter((item) => item && item.resource && item.start && item.end)
+  : [];
 
-        return item;
-      })
-    };
+const bestResult = availableResults[0];
+
+if (!bestResult) {
+  return res.status(400).json({
+    error: "No available optimization result found",
+    generatedSlots,
+    scoreData
+  });
+}
+
+const alternatives = availableResults
+  .slice(1, 6)
+  .map((item) => ({
+    slot: item.slot || null,
+    resource: item.resource,
+    start: item.start,
+    end: item.end,
+    trip: item.trip || null,
+    score: item.score || null
+  }));
+
+const enrichedResponse = {
+  results: [
+    {
+      ...bestResult,
+      orgLevel
+    }
+  ],
+  alternatives,
+  generatedSlotsCount: generatedSlots.length
+};
 
     console.log("Returning enriched response:", JSON.stringify(enrichedResponse, null, 2));
 
