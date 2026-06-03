@@ -1,5 +1,6 @@
 const express = require("express");
 const axios = require("axios");
+const { DateTime } = require("luxon");
 require("dotenv").config();
 
 const app = express();
@@ -14,7 +15,13 @@ const {
   FSM_ACCOUNT_NAME,
   FSM_COMPANY_ID,
   FSM_COMPANY_NAME,
-  OPTIMIZATION_URL
+  OPTIMIZATION_URL,
+
+  SLOT_TIMEZONE = "Europe/Athens",
+  SLOT_DAYS_AHEAD = "5",
+  SLOT_WORKING_DAY_START = "08:00",
+  SLOT_WORKING_DAY_END = "18:00",
+  SLOT_START_BUFFER_MINUTES = "15"
 } = process.env;
 
 if (
@@ -52,6 +59,55 @@ function fsmHeaders(token) {
     "x-company-id": FSM_COMPANY_ID,
     "x-company-name": FSM_COMPANY_NAME
   };
+}
+
+function generateRollingSlots({
+  timezone = SLOT_TIMEZONE,
+  daysAhead = Number(SLOT_DAYS_AHEAD),
+  workingDayStart = SLOT_WORKING_DAY_START,
+  workingDayEnd = SLOT_WORKING_DAY_END,
+  startBufferMinutes = Number(SLOT_START_BUFFER_MINUTES)
+} = {}) {
+  const now = DateTime.now()
+    .setZone(timezone)
+    .plus({ minutes: startBufferMinutes });
+
+  const [startHour, startMinute] = workingDayStart.split(":").map(Number);
+  const [endHour, endMinute] = workingDayEnd.split(":").map(Number);
+
+  const slots = [];
+
+  for (let i = 0; i < daysAhead; i++) {
+    const day = now.plus({ days: i });
+
+    let slotStart = day.set({
+      hour: startHour,
+      minute: startMinute,
+      second: 0,
+      millisecond: 0
+    });
+
+    const slotEnd = day.set({
+      hour: endHour,
+      minute: endMinute,
+      second: 0,
+      millisecond: 0
+    });
+
+    // Za današnji dan nikad ne šaljemo slot u prošlosti
+    if (i === 0 && now > slotStart) {
+      slotStart = now;
+    }
+
+    if (slotStart < slotEnd) {
+      slots.push({
+        start: slotStart.toUTC().toISO(),
+        end: slotEnd.toUTC().toISO()
+      });
+    }
+  }
+
+  return slots;
 }
 
 async function getFsmToken() {
@@ -105,12 +161,7 @@ function normalizeOrgLevel(orgLevel) {
   }
 
   if (typeof orgLevel === "object") {
-    return (
-      orgLevel.id ||
-      orgLevel.objectId ||
-      orgLevel.externalId ||
-      null
-    );
+    return orgLevel.id || orgLevel.objectId || orgLevel.externalId || null;
   }
 
   return null;
@@ -136,6 +187,7 @@ function extractOrgLevel(personWrapper) {
 
   return normalizeOrgLevel(rawOrgLevel);
 }
+
 app.get("/health", (req, res) => {
   res.json({
     status: "ok",
@@ -150,11 +202,20 @@ app.post("/score-with-org-level", async (req, res) => {
 
     const token = await getFsmToken();
 
+    const generatedSlots = generateRollingSlots();
+
+    const optimizationPayload = {
+      ...req.body,
+      slots: generatedSlots
+    };
+
+    console.log("Generated slots:", JSON.stringify(generatedSlots, null, 2));
     console.log("Calling optimization endpoint...");
+    console.log("Optimization payload:", JSON.stringify(optimizationPayload, null, 2));
 
     const scoreResponse = await axios.post(
       OPTIMIZATION_URL,
-      req.body,
+      optimizationPayload,
       {
         headers: fsmHeaders(token)
       }
@@ -169,6 +230,7 @@ app.post("/score-with-org-level", async (req, res) => {
     if (!firstResult || !firstResult.resource) {
       return res.status(400).json({
         error: "Optimization response does not contain results[0].resource",
+        generatedSlots,
         scoreData
       });
     }
@@ -201,6 +263,7 @@ app.post("/score-with-org-level", async (req, res) => {
 
     const enrichedResponse = {
       ...scoreData,
+      generatedSlots,
       results: scoreData.results.map((item, index) => {
         if (index === 0) {
           return {
