@@ -15,13 +15,7 @@ const {
   FSM_ACCOUNT_NAME,
   FSM_COMPANY_ID,
   FSM_COMPANY_NAME,
-  OPTIMIZATION_URL,
-
-  SLOT_TIMEZONE = "Europe/Athens",
-  SLOT_DAYS_AHEAD = "5",
-  SLOT_WORKING_DAY_START = "08:00",
-  SLOT_WORKING_DAY_END = "18:00",
-  SLOT_START_BUFFER_MINUTES = "15"
+  OPTIMIZATION_URL
 } = process.env;
 
 if (
@@ -61,13 +55,14 @@ function fsmHeaders(token) {
   };
 }
 
-function generateRollingSlots({
-  timezone = SLOT_TIMEZONE,
-  daysAhead = Number(SLOT_DAYS_AHEAD),
-  workingDayStart = SLOT_WORKING_DAY_START,
-  workingDayEnd = SLOT_WORKING_DAY_END,
-  startBufferMinutes = Number(SLOT_START_BUFFER_MINUTES)
-} = {}) {
+function generateRollingSlots() {
+  const timezone = "Europe/Athens";
+  const daysAhead = 5;
+  const workingDayStart = "08:00";
+  const workingDayEnd = "18:00";
+  const startBufferMinutes = 15;
+  const slotLengthMinutes = 15;
+
   const now = DateTime.now()
     .setZone(timezone)
     .plus({ minutes: startBufferMinutes });
@@ -80,30 +75,55 @@ function generateRollingSlots({
   for (let i = 0; i < daysAhead; i++) {
     const day = now.plus({ days: i });
 
-    let slotStart = day.set({
+    let dayStart = day.set({
       hour: startHour,
       minute: startMinute,
       second: 0,
       millisecond: 0
     });
 
-    const slotEnd = day.set({
+    const dayEnd = day.set({
       hour: endHour,
       minute: endMinute,
       second: 0,
       millisecond: 0
     });
 
-    // Za današnji dan nikad ne šaljemo slot u prošlosti
-    if (i === 0 && now > slotStart) {
-      slotStart = now;
+    // Za današnji dan ne šaljemo slotove u prošlosti
+    if (i === 0 && now > dayStart) {
+      dayStart = now;
     }
 
-    if (slotStart < slotEnd) {
-      slots.push({
-        start: slotStart.toUTC().toISO(),
-        end: slotEnd.toUTC().toISO()
+    // Zaokruži početak na sledeći 15-minutni interval
+    const remainder = dayStart.minute % slotLengthMinutes;
+
+    if (remainder !== 0) {
+      dayStart = dayStart
+        .plus({ minutes: slotLengthMinutes - remainder })
+        .set({
+          second: 0,
+          millisecond: 0
+        });
+    } else {
+      dayStart = dayStart.set({
+        second: 0,
+        millisecond: 0
       });
+    }
+
+    let slotStart = dayStart;
+
+    while (slotStart < dayEnd) {
+      const slotEnd = slotStart.plus({ minutes: slotLengthMinutes });
+
+      if (slotEnd <= dayEnd) {
+        slots.push({
+          start: slotStart.toUTC().toISO(),
+          end: slotEnd.toUTC().toISO()
+        });
+      }
+
+      slotStart = slotEnd;
     }
   }
 
@@ -209,7 +229,8 @@ app.post("/score-with-org-level", async (req, res) => {
       slots: generatedSlots
     };
 
-    console.log("Generated slots:", JSON.stringify(generatedSlots, null, 2));
+    console.log("Generated 15-minute rolling slots:", JSON.stringify(generatedSlots, null, 2));
+
     console.log("Calling optimization endpoint...");
     console.log("Optimization payload:", JSON.stringify(optimizationPayload, null, 2));
 
