@@ -61,7 +61,12 @@ function generateRollingSlots() {
   const workingDayStart = "08:00";
   const workingDayEnd = "18:00";
   const startBufferMinutes = 15;
-  const slotLengthMinutes = 15;
+
+  // Optimizer traži da slot traje minimum 30 minuta
+  const slotDurationMinutes = 30;
+
+  // Ali novi slot počinje na svakih 15 minuta
+  const slotStepMinutes = 15;
 
   const now = DateTime.now()
     .setZone(timezone)
@@ -95,11 +100,11 @@ function generateRollingSlots() {
     }
 
     // Zaokruži početak na sledeći 15-minutni interval
-    const remainder = dayStart.minute % slotLengthMinutes;
+    const remainder = dayStart.minute % slotStepMinutes;
 
     if (remainder !== 0) {
       dayStart = dayStart
-        .plus({ minutes: slotLengthMinutes - remainder })
+        .plus({ minutes: slotStepMinutes - remainder })
         .set({
           second: 0,
           millisecond: 0
@@ -114,7 +119,7 @@ function generateRollingSlots() {
     let slotStart = dayStart;
 
     while (slotStart < dayEnd) {
-      const slotEnd = slotStart.plus({ minutes: slotLengthMinutes });
+      const slotEnd = slotStart.plus({ minutes: slotDurationMinutes });
 
       if (slotEnd <= dayEnd) {
         slots.push({
@@ -123,7 +128,8 @@ function generateRollingSlots() {
         });
       }
 
-      slotStart = slotEnd;
+      // Sledeći slot kreće 15 minuta kasnije
+      slotStart = slotStart.plus({ minutes: slotStepMinutes });
     }
   }
 
