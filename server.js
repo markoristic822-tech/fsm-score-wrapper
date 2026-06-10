@@ -206,11 +206,7 @@ async function getRequirementsForServiceCall(serviceCallId, token) {
   const queriesToTry = [
     `object.objectId="${serviceCallId}"`,
     `object.objectId="${serviceCallId}" AND object.objectType="SERVICECALL"`,
-    `object.objectId="${serviceCallId}" and object.objectType="SERVICECALL"`,
-    `object="${serviceCallId}"`,
-    `objectId="${serviceCallId}"`,
-    `serviceCall.id="${serviceCallId}"`,
-    `serviceCall="${serviceCallId}"`
+    `object.objectId="${serviceCallId}" and object.objectType="SERVICECALL"`
   ];
 
   const errors = [];
@@ -422,6 +418,9 @@ function extractSkillFromRequirement(requirementWrapper) {
 
   const skills = [];
 
+  // Kod tebe je skill/tag u Requirement DTO-u ovde:
+  addSkillIfValid(skills, requirement.tag);
+
   const possibleSkillObjects = [
     requirement.skill,
     requirement.mandatorySkill,
@@ -530,7 +529,6 @@ function extractPersonSkills(personWrapper) {
 }
 
 function compareSkills(requiredSkills, personSkills) {
-  const requiredSet = new Set(requiredSkills.map((item) => String(item).toLowerCase()));
   const personSet = new Set(personSkills.map((item) => String(item).toLowerCase()));
 
   const matched = [];
@@ -661,7 +659,7 @@ app.post("/score-with-org-level", async (req, res) => {
           requirementResponse: requirementLookup.response,
           requirementErrors: requirementLookup.errors || [],
           hint:
-            "Check Requirement columns for skill field and query object.objectId = ServiceCall ID."
+            "Requirement exists, but no skill/tag field was found. Check if field is named tag, skill, skillCode, skillId."
         });
       }
     }
