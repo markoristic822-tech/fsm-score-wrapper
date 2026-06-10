@@ -1,5 +1,6 @@
 const express = require("express");
 const axios = require("axios");
+const { DateTime } = require("luxon");
 require("dotenv").config();
 
 const app = express();
@@ -14,7 +15,8 @@ const {
   FSM_ACCOUNT_NAME,
   FSM_COMPANY_ID,
   FSM_COMPANY_NAME,
-  OPTIMIZATION_URL
+  OPTIMIZATION_URL,
+  FSM_REQUIREMENT_DTO = "Requirement.10"
 } = process.env;
 
 if (
@@ -36,7 +38,8 @@ if (
     FSM_ACCOUNT_NAME: !!FSM_ACCOUNT_NAME,
     FSM_COMPANY_ID: !!FSM_COMPANY_ID,
     FSM_COMPANY_NAME: !!FSM_COMPANY_NAME,
-    OPTIMIZATION_URL: !!OPTIMIZATION_URL
+    OPTIMIZATION_URL: !!OPTIMIZATION_URL,
+    FSM_REQUIREMENT_DTO
   });
   process.exit(1);
 }
@@ -91,12 +94,10 @@ function generateRollingSlots() {
       millisecond: 0
     });
 
-    // Za današnji dan ne šaljemo slotove u prošlosti
     if (i === 0 && now > dayStart) {
       dayStart = now;
     }
 
-    // Zaokruži na sledeći 30-minutni interval
     const minute = dayStart.minute;
 
     if (minute > 0 && minute <= 30) {
@@ -160,7 +161,7 @@ async function getPerson(resourceId, token) {
 
   const url =
     `${FSM_BASE_URL}/api/data/v4/Person` +
-    `?dtos=Person.25&query=id%3D%22${resourceId}%22`;
+    `?dtos=Person.25&query=${encodeURIComponent(`id="${resourceId}"`)}`;
 
   const response = await axios.get(url, {
     headers: fsmHeaders(token)
@@ -174,7 +175,7 @@ async function getServiceCall(serviceCallId, token) {
 
   const url =
     `${FSM_BASE_URL}/api/data/v4/ServiceCall` +
-    `?dtos=ServiceCall.27&query=id%3D%22${serviceCallId}%22`;
+    `?dtos=ServiceCall.27&query=${encodeURIComponent(`id="${serviceCallId}"`)}`;
 
   const response = await axios.get(url, {
     headers: fsmHeaders(token)
@@ -183,13 +184,78 @@ async function getServiceCall(serviceCallId, token) {
   return response.data;
 }
 
+async function getRequirementsForServiceCall(serviceCallId, token) {
+  console.log("Getting Requirements for ServiceCall:", serviceCallId);
+
+  const queriesToTry = [
+    `serviceCall.id="${serviceCallId}"`,
+    `serviceCall="${serviceCallId}"`,
+    `object.objectId="${serviceCallId}"`,
+    `object="${serviceCallId}"`,
+    `objectId="${serviceCallId}"`
+  ];
+
+  const allErrors = [];
+
+  for (const query of queriesToTry) {
+    const url =
+      `${FSM_BASE_URL}/api/data/v4/Requirement` +
+      `?dtos=${FSM_REQUIREMENT_DTO}&query=${encodeURIComponent(query)}`;
+
+    try {
+      console.log("Trying Requirement query:", query);
+
+      const response = await axios.get(url, {
+        headers: fsmHeaders(token)
+      });
+
+      console.log("Requirement response:", JSON.stringify(response.data, null, 2));
+
+      return response.data;
+    } catch (error) {
+      const status = error.response?.status || null;
+      const data = error.response?.data || error.message;
+
+      allErrors.push({
+        query,
+        status,
+        data
+      });
+
+      console.log(
+        "Requirement query failed:",
+        query,
+        status,
+        JSON.stringify(data)
+      );
+    }
+  }
+
+  console.log("All Requirement queries failed:", JSON.stringify(allErrors, null, 2));
+
+  return {
+    data: [],
+    errors: allErrors
+  };
+}
+
 function getFirstItem(response) {
   if (Array.isArray(response)) return response[0];
-  if (Array.isArray(response.data)) return response.data[0];
-  if (Array.isArray(response.items)) return response.items[0];
-  if (Array.isArray(response.values)) return response.values[0];
-  if (Array.isArray(response.records)) return response.records[0];
+  if (Array.isArray(response?.data)) return response.data[0];
+  if (Array.isArray(response?.items)) return response.items[0];
+  if (Array.isArray(response?.values)) return response.values[0];
+  if (Array.isArray(response?.records)) return response.records[0];
   return null;
+}
+
+function unwrapServiceCall(serviceCallWrapper) {
+  if (!serviceCallWrapper) return null;
+
+  return (
+    serviceCallWrapper.serviceCall ||
+    serviceCallWrapper.ServiceCall ||
+    serviceCallWrapper
+  );
 }
 
 function normalizeOrgLevel(orgLevel) {
@@ -213,28 +279,17 @@ function extractOrgLevel(personWrapper) {
     personWrapper;
 
   const rawOrgLevel =
+    person.orgLevelIds?.[0] ||
     person.orgLevel ||
     person.orgLevelId ||
-    person.orgLevelIds?.[0] ||
     person.orgLevels?.[0] ||
     person.organizationLevel ||
     person.organizationLevelId ||
     person.organizationLevelIds?.[0] ||
     person.organizationalLevel ||
-    person.organization ||
-    person.regions?.[0];
+    person.organization;
 
   return normalizeOrgLevel(rawOrgLevel);
-}
-
-function unwrapServiceCall(serviceCallWrapper) {
-  if (!serviceCallWrapper) return null;
-
-  return (
-    serviceCallWrapper.serviceCall ||
-    serviceCallWrapper.ServiceCall ||
-    serviceCallWrapper
-  );
 }
 
 function extractDurationFromServiceCall(serviceCall) {
@@ -302,7 +357,8 @@ function extractMandatorySkillsFromServiceCall(serviceCall) {
     serviceCall.requiredSkills
   ];
 
-  const requirements = possibleRequirements.find((item) => Array.isArray(item)) || [];
+  const requirements =
+    possibleRequirements.find((item) => Array.isArray(item)) || [];
 
   const skills = [];
 
@@ -322,6 +378,64 @@ function extractMandatorySkillsFromServiceCall(serviceCall) {
     }
 
     if (requirement && typeof requirement === "object") {
+      if (requirement.skillCode) skills.push(requirement.skillCode);
+      if (requirement.skillName) skills.push(requirement.skillName);
+      if (requirement.skillId) skills.push(requirement.skillId);
+
+      if (requirement.code) skills.push(requirement.code);
+      if (requirement.name) skills.push(requirement.name);
+      if (requirement.externalId) skills.push(requirement.externalId);
+      if (requirement.id) skills.push(requirement.id);
+    }
+  }
+
+  if (skills.length === 0 && serviceCall.problemTypeName) {
+    skills.push(serviceCall.problemTypeName);
+  }
+
+  if (skills.length === 0 && serviceCall.problemTypeCode) {
+    skills.push(serviceCall.problemTypeCode);
+  }
+
+  return [...new Set(skills.filter(Boolean))];
+}
+
+function extractMandatorySkillsFromRequirements(requirementResponse) {
+  const rows = Array.isArray(requirementResponse?.data)
+    ? requirementResponse.data
+    : [];
+
+  const skills = [];
+
+  for (const row of rows) {
+    const requirement =
+      row.requirement ||
+      row.Requirement ||
+      row;
+
+    const skill =
+      requirement.skill ||
+      requirement.mandatorySkill ||
+      requirement.requiredSkill ||
+      null;
+
+    if (typeof skill === "string") {
+      skills.push(skill);
+      continue;
+    }
+
+    if (skill && typeof skill === "object") {
+      if (skill.code) skills.push(skill.code);
+      if (skill.name) skills.push(skill.name);
+      if (skill.externalId) skills.push(skill.externalId);
+      if (skill.id) skills.push(skill.id);
+    }
+
+    if (requirement && typeof requirement === "object") {
+      if (requirement.skillCode) skills.push(requirement.skillCode);
+      if (requirement.skillName) skills.push(requirement.skillName);
+      if (requirement.skillId) skills.push(requirement.skillId);
+
       if (requirement.code) skills.push(requirement.code);
       if (requirement.name) skills.push(requirement.name);
       if (requirement.externalId) skills.push(requirement.externalId);
@@ -332,10 +446,15 @@ function extractMandatorySkillsFromServiceCall(serviceCall) {
   return [...new Set(skills.filter(Boolean))];
 }
 
-function buildOptimizationPayload(reqBody, serviceCall) {
+function buildOptimizationPayload(
+  reqBody,
+  serviceCall,
+  mandatorySkillsFromRequirements = []
+) {
   const durationFromServiceCall = extractDurationFromServiceCall(serviceCall);
   const locationFromServiceCall = extractLocationFromServiceCall(serviceCall);
-  const mandatorySkillsFromServiceCall = extractMandatorySkillsFromServiceCall(serviceCall);
+  const mandatorySkillsFromServiceCall =
+    extractMandatorySkillsFromServiceCall(serviceCall);
 
   const fallbackJob = reqBody.job || {};
 
@@ -354,11 +473,13 @@ function buildOptimizationPayload(reqBody, serviceCall) {
     };
 
   const mandatorySkills =
-    mandatorySkillsFromServiceCall.length > 0
-      ? mandatorySkillsFromServiceCall
-      : fallbackJob.mandatorySkills || [];
+    mandatorySkillsFromRequirements.length > 0
+      ? mandatorySkillsFromRequirements
+      : mandatorySkillsFromServiceCall.length > 0
+        ? mandatorySkillsFromServiceCall
+        : fallbackJob.mandatorySkills || [];
 
-  const optimizationPayload = {
+  return {
     job: {
       durationMinutes,
       location,
@@ -378,8 +499,6 @@ function buildOptimizationPayload(reqBody, serviceCall) {
     },
     policy: reqBody.policy || "DistanceAndSkills"
   };
-
-  return optimizationPayload;
 }
 
 app.get("/health", (req, res) => {
@@ -398,6 +517,8 @@ app.post("/score-with-org-level", async (req, res) => {
 
     let serviceCall = null;
     let serviceCallResponse = null;
+    let requirementResponse = null;
+    let mandatorySkillsFromRequirements = [];
 
     if (req.body.serviceCallId) {
       serviceCallResponse = await getServiceCall(req.body.serviceCallId, token);
@@ -414,12 +535,36 @@ app.post("/score-with-org-level", async (req, res) => {
           serviceCallResponse
         });
       }
+
+      requirementResponse = await getRequirementsForServiceCall(
+        req.body.serviceCallId,
+        token
+      );
+
+      mandatorySkillsFromRequirements =
+        extractMandatorySkillsFromRequirements(requirementResponse);
+
+      console.log(
+        "Mandatory skills from Requirement DTO:",
+        mandatorySkillsFromRequirements
+      );
     }
 
-    const optimizationPayload = buildOptimizationPayload(req.body, serviceCall);
+    const optimizationPayload = buildOptimizationPayload(
+      req.body,
+      serviceCall,
+      mandatorySkillsFromRequirements
+    );
 
-    console.log("Generated dynamic 7-day slot:", JSON.stringify(optimizationPayload.slots, null, 2));
-    console.log("Optimization payload:", JSON.stringify(optimizationPayload, null, 2));
+    console.log(
+      "Generated 30-minute rolling slots:",
+      JSON.stringify(optimizationPayload.slots, null, 2)
+    );
+
+    console.log(
+      "Optimization payload:",
+      JSON.stringify(optimizationPayload, null, 2)
+    );
 
     const scoreResponse = await axios.post(
       OPTIMIZATION_URL,
@@ -434,7 +579,9 @@ app.post("/score-with-org-level", async (req, res) => {
     console.log("Optimization response:", JSON.stringify(scoreData, null, 2));
 
     const availableResults = Array.isArray(scoreData.results)
-      ? scoreData.results.filter((item) => item && item.resource && item.start && item.end)
+      ? scoreData.results.filter(
+          (item) => item && item.resource && item.start && item.end
+        )
       : [];
 
     const bestResult = availableResults[0];
@@ -492,10 +639,14 @@ app.post("/score-with-org-level", async (req, res) => {
         }
       ],
       alternatives,
-      generatedSlotsCount: optimizationPayload.slots.length
+      generatedSlotsCount: optimizationPayload.slots.length,
+      mandatorySkillsUsed: optimizationPayload.job.mandatorySkills
     };
 
-    console.log("Returning enriched response:", JSON.stringify(enrichedResponse, null, 2));
+    console.log(
+      "Returning enriched response:",
+      JSON.stringify(enrichedResponse, null, 2)
+    );
 
     return res.json(enrichedResponse);
   } catch (error) {
