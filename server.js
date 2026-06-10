@@ -19,6 +19,10 @@ const {
   FSM_REQUIREMENT_DTO = "Requirement.10"
 } = process.env;
 
+const PROBLEM_TYPE_SKILL_MAP = {
+  FTTH: ["FTTH", "10173"]
+};
+
 if (
   !FSM_BASE_URL ||
   !FSM_CLIENT_ID ||
@@ -347,6 +351,26 @@ function extractLocationFromServiceCall(serviceCall) {
   };
 }
 
+function addSkillIfValid(skills, value) {
+  if (!value) return;
+
+  if (typeof value !== "string") return;
+
+  const cleaned = value.trim();
+
+  if (!cleaned) return;
+
+  skills.push(cleaned);
+}
+
+function mapProblemTypeToSkills(problemTypeName) {
+  if (!problemTypeName) return [];
+
+  const key = String(problemTypeName).trim().toUpperCase();
+
+  return PROBLEM_TYPE_SKILL_MAP[key] || [problemTypeName];
+}
+
 function extractMandatorySkillsFromServiceCall(serviceCall) {
   if (!serviceCall) return [];
 
@@ -366,35 +390,27 @@ function extractMandatorySkillsFromServiceCall(serviceCall) {
     const skill = requirement.skill || requirement;
 
     if (typeof skill === "string") {
-      skills.push(skill);
+      addSkillIfValid(skills, skill);
       continue;
     }
 
     if (skill && typeof skill === "object") {
-      if (skill.code) skills.push(skill.code);
-      if (skill.name) skills.push(skill.name);
-      if (skill.externalId) skills.push(skill.externalId);
-      if (skill.id) skills.push(skill.id);
+      addSkillIfValid(skills, skill.code);
+      addSkillIfValid(skills, skill.name);
+      addSkillIfValid(skills, skill.externalId);
+      addSkillIfValid(skills, skill.id);
     }
 
     if (requirement && typeof requirement === "object") {
-      if (requirement.skillCode) skills.push(requirement.skillCode);
-      if (requirement.skillName) skills.push(requirement.skillName);
-      if (requirement.skillId) skills.push(requirement.skillId);
-
-      if (requirement.code) skills.push(requirement.code);
-      if (requirement.name) skills.push(requirement.name);
-      if (requirement.externalId) skills.push(requirement.externalId);
-      if (requirement.id) skills.push(requirement.id);
+      addSkillIfValid(skills, requirement.skillCode);
+      addSkillIfValid(skills, requirement.skillName);
+      addSkillIfValid(skills, requirement.skillId);
     }
   }
 
   if (skills.length === 0 && serviceCall.problemTypeName) {
-    skills.push(serviceCall.problemTypeName);
-  }
-
-  if (skills.length === 0 && serviceCall.problemTypeCode) {
-    skills.push(serviceCall.problemTypeCode);
+    const mappedSkills = mapProblemTypeToSkills(serviceCall.problemTypeName);
+    skills.push(...mappedSkills);
   }
 
   return [...new Set(skills.filter(Boolean))];
@@ -420,26 +436,21 @@ function extractMandatorySkillsFromRequirements(requirementResponse) {
       null;
 
     if (typeof skill === "string") {
-      skills.push(skill);
+      addSkillIfValid(skills, skill);
       continue;
     }
 
     if (skill && typeof skill === "object") {
-      if (skill.code) skills.push(skill.code);
-      if (skill.name) skills.push(skill.name);
-      if (skill.externalId) skills.push(skill.externalId);
-      if (skill.id) skills.push(skill.id);
+      addSkillIfValid(skills, skill.code);
+      addSkillIfValid(skills, skill.name);
+      addSkillIfValid(skills, skill.externalId);
+      addSkillIfValid(skills, skill.id);
     }
 
     if (requirement && typeof requirement === "object") {
-      if (requirement.skillCode) skills.push(requirement.skillCode);
-      if (requirement.skillName) skills.push(requirement.skillName);
-      if (requirement.skillId) skills.push(requirement.skillId);
-
-      if (requirement.code) skills.push(requirement.code);
-      if (requirement.name) skills.push(requirement.name);
-      if (requirement.externalId) skills.push(requirement.externalId);
-      if (requirement.id) skills.push(requirement.id);
+      addSkillIfValid(skills, requirement.skillCode);
+      addSkillIfValid(skills, requirement.skillName);
+      addSkillIfValid(skills, requirement.skillId);
     }
   }
 
@@ -479,6 +490,8 @@ function buildOptimizationPayload(
         ? mandatorySkillsFromServiceCall
         : fallbackJob.mandatorySkills || [];
 
+  const includeMandatorySkills = mandatorySkills.length > 0;
+
   return {
     job: {
       durationMinutes,
@@ -489,7 +502,7 @@ function buildOptimizationPayload(
       filters: {
         includeInternalPersons: true,
         includeCrowdPersons: false,
-        includeMandatorySkills: true
+        includeMandatorySkills
       }
     },
     slots: generateRollingSlots(),
@@ -557,8 +570,13 @@ app.post("/score-with-org-level", async (req, res) => {
     );
 
     console.log(
-      "Generated 30-minute rolling slots:",
-      JSON.stringify(optimizationPayload.slots, null, 2)
+      "Generated 30-minute rolling slots count:",
+      optimizationPayload.slots.length
+    );
+
+    console.log(
+      "Mandatory skills used:",
+      optimizationPayload.job.mandatorySkills
     );
 
     console.log(
