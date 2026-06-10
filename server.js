@@ -55,20 +55,84 @@ function fsmHeaders(token) {
 }
 
 function generateRollingSlots() {
-  const start = new Date();
+  const timezone = "Europe/Athens";
+  const daysAhead = 7;
 
-  // Pomeri malo u budućnost da Optimization ne prijavi overlap sa trenutnim vremenom
-  start.setMinutes(start.getMinutes() + 5);
+  const workingDayStart = "08:00";
+  const workingDayEnd = "18:00";
 
-  const end = new Date(start);
-  end.setDate(end.getDate() + 7);
+  const startBufferMinutes = 5;
+  const slotDurationMinutes = 30;
+  const slotStepMinutes = 30;
 
-  return [
-    {
-      start: start.toISOString(),
-      end: end.toISOString()
+  const now = DateTime.now()
+    .setZone(timezone)
+    .plus({ minutes: startBufferMinutes });
+
+  const [startHour, startMinute] = workingDayStart.split(":").map(Number);
+  const [endHour, endMinute] = workingDayEnd.split(":").map(Number);
+
+  const slots = [];
+
+  for (let i = 0; i < daysAhead; i++) {
+    const day = now.plus({ days: i });
+
+    let dayStart = day.set({
+      hour: startHour,
+      minute: startMinute,
+      second: 0,
+      millisecond: 0
+    });
+
+    const dayEnd = day.set({
+      hour: endHour,
+      minute: endMinute,
+      second: 0,
+      millisecond: 0
+    });
+
+    // Za današnji dan ne šaljemo slotove u prošlosti
+    if (i === 0 && now > dayStart) {
+      dayStart = now;
     }
-  ];
+
+    // Zaokruži na sledeći 30-minutni interval
+    const minute = dayStart.minute;
+
+    if (minute > 0 && minute <= 30) {
+      dayStart = dayStart.set({
+        minute: 30,
+        second: 0,
+        millisecond: 0
+      });
+    } else if (minute > 30) {
+      dayStart = dayStart.plus({ hours: 1 }).set({
+        minute: 0,
+        second: 0,
+        millisecond: 0
+      });
+    } else {
+      dayStart = dayStart.set({
+        second: 0,
+        millisecond: 0
+      });
+    }
+
+    let slotStart = dayStart;
+
+    while (slotStart.plus({ minutes: slotDurationMinutes }) <= dayEnd) {
+      const slotEnd = slotStart.plus({ minutes: slotDurationMinutes });
+
+      slots.push({
+        start: slotStart.toUTC().toISO(),
+        end: slotEnd.toUTC().toISO()
+      });
+
+      slotStart = slotStart.plus({ minutes: slotStepMinutes });
+    }
+  }
+
+  return slots;
 }
 
 async function getFsmToken() {
