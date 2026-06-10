@@ -1,6 +1,5 @@
 const express = require("express");
 const axios = require("axios");
-const { DateTime } = require("luxon");
 require("dotenv").config();
 
 const app = express();
@@ -56,84 +55,20 @@ function fsmHeaders(token) {
 }
 
 function generateRollingSlots() {
-  const timezone = "Europe/Athens";
-  const daysAhead = 5;
-  const workingDayStart = "08:00";
-  const workingDayEnd = "18:00";
-  const startBufferMinutes = 15;
+  const start = new Date();
 
-  // Optimizer traži da slot traje minimum 30 minuta
-  const slotDurationMinutes = 30;
+  // Pomeri malo u budućnost da Optimization ne prijavi overlap sa trenutnim vremenom
+  start.setMinutes(start.getMinutes() + 5);
 
-  // Ali novi slot počinje na svakih 15 minuta
-  const slotStepMinutes = 15;
+  const end = new Date(start);
+  end.setDate(end.getDate() + 7);
 
-  const now = DateTime.now()
-    .setZone(timezone)
-    .plus({ minutes: startBufferMinutes });
-
-  const [startHour, startMinute] = workingDayStart.split(":").map(Number);
-  const [endHour, endMinute] = workingDayEnd.split(":").map(Number);
-
-  const slots = [];
-
-  for (let i = 0; i < daysAhead; i++) {
-    const day = now.plus({ days: i });
-
-    let dayStart = day.set({
-      hour: startHour,
-      minute: startMinute,
-      second: 0,
-      millisecond: 0
-    });
-
-    const dayEnd = day.set({
-      hour: endHour,
-      minute: endMinute,
-      second: 0,
-      millisecond: 0
-    });
-
-    // Za današnji dan ne šaljemo slotove u prošlosti
-    if (i === 0 && now > dayStart) {
-      dayStart = now;
+  return [
+    {
+      start: start.toISOString(),
+      end: end.toISOString()
     }
-
-    // Zaokruži početak na sledeći 15-minutni interval
-    const remainder = dayStart.minute % slotStepMinutes;
-
-    if (remainder !== 0) {
-      dayStart = dayStart
-        .plus({ minutes: slotStepMinutes - remainder })
-        .set({
-          second: 0,
-          millisecond: 0
-        });
-    } else {
-      dayStart = dayStart.set({
-        second: 0,
-        millisecond: 0
-      });
-    }
-
-    let slotStart = dayStart;
-
-    while (slotStart < dayEnd) {
-      const slotEnd = slotStart.plus({ minutes: slotDurationMinutes });
-
-      if (slotEnd <= dayEnd) {
-        slots.push({
-          start: slotStart.toUTC().toISO(),
-          end: slotEnd.toUTC().toISO()
-        });
-      }
-
-      // Sledeći slot kreće 15 minuta kasnije
-      slotStart = slotStart.plus({ minutes: slotStepMinutes });
-    }
-  }
-
-  return slots;
+  ];
 }
 
 async function getFsmToken() {
@@ -162,6 +97,20 @@ async function getPerson(resourceId, token) {
   const url =
     `${FSM_BASE_URL}/api/data/v4/Person` +
     `?dtos=Person.25&query=id%3D%22${resourceId}%22`;
+
+  const response = await axios.get(url, {
+    headers: fsmHeaders(token)
+  });
+
+  return response.data;
+}
+
+async function getServiceCall(serviceCallId, token) {
+  console.log("Getting ServiceCall:", serviceCallId);
+
+  const url =
+    `${FSM_BASE_URL}/api/data/v4/ServiceCall` +
+    `?dtos=ServiceCall.27&query=id%3D%22${serviceCallId}%22`;
 
   const response = await axios.get(url, {
     headers: fsmHeaders(token)
@@ -214,6 +163,161 @@ function extractOrgLevel(personWrapper) {
   return normalizeOrgLevel(rawOrgLevel);
 }
 
+function unwrapServiceCall(serviceCallWrapper) {
+  if (!serviceCallWrapper) return null;
+
+  return (
+    serviceCallWrapper.serviceCall ||
+    serviceCallWrapper.ServiceCall ||
+    serviceCallWrapper
+  );
+}
+
+function extractDurationFromServiceCall(serviceCall) {
+  if (!serviceCall) return null;
+
+  return (
+    serviceCall.durationInMinutes ||
+    serviceCall.durationMinutes ||
+    serviceCall.duration ||
+    serviceCall.plannedDurationInMinutes ||
+    null
+  );
+}
+
+function extractLocationFromServiceCall(serviceCall) {
+  if (!serviceCall) return null;
+
+  const address = serviceCall.address || {};
+
+  const latitude =
+    serviceCall.latitude ||
+    serviceCall.lat ||
+    serviceCall.location?.latitude ||
+    serviceCall.location?.lat ||
+    address.latitude ||
+    address.lat ||
+    address.location?.latitude ||
+    address.location?.lat ||
+    address.geoLatitude ||
+    null;
+
+  const longitude =
+    serviceCall.longitude ||
+    serviceCall.lng ||
+    serviceCall.lon ||
+    serviceCall.location?.longitude ||
+    serviceCall.location?.lng ||
+    serviceCall.location?.lon ||
+    address.longitude ||
+    address.lng ||
+    address.lon ||
+    address.location?.longitude ||
+    address.location?.lng ||
+    address.location?.lon ||
+    address.geoLongitude ||
+    null;
+
+  if (!latitude || !longitude) {
+    return null;
+  }
+
+  return {
+    latitude: Number(latitude),
+    longitude: Number(longitude)
+  };
+}
+
+function extractMandatorySkillsFromServiceCall(serviceCall) {
+  if (!serviceCall) return [];
+
+  const possibleRequirements = [
+    serviceCall.requirements,
+    serviceCall.mandatorySkills,
+    serviceCall.skills,
+    serviceCall.requiredSkills
+  ];
+
+  const requirements = possibleRequirements.find((item) => Array.isArray(item)) || [];
+
+  const skills = [];
+
+  for (const requirement of requirements) {
+    const skill = requirement.skill || requirement;
+
+    if (typeof skill === "string") {
+      skills.push(skill);
+      continue;
+    }
+
+    if (skill && typeof skill === "object") {
+      if (skill.code) skills.push(skill.code);
+      if (skill.name) skills.push(skill.name);
+      if (skill.externalId) skills.push(skill.externalId);
+      if (skill.id) skills.push(skill.id);
+    }
+
+    if (requirement && typeof requirement === "object") {
+      if (requirement.code) skills.push(requirement.code);
+      if (requirement.name) skills.push(requirement.name);
+      if (requirement.externalId) skills.push(requirement.externalId);
+      if (requirement.id) skills.push(requirement.id);
+    }
+  }
+
+  return [...new Set(skills.filter(Boolean))];
+}
+
+function buildOptimizationPayload(reqBody, serviceCall) {
+  const durationFromServiceCall = extractDurationFromServiceCall(serviceCall);
+  const locationFromServiceCall = extractLocationFromServiceCall(serviceCall);
+  const mandatorySkillsFromServiceCall = extractMandatorySkillsFromServiceCall(serviceCall);
+
+  const fallbackJob = reqBody.job || {};
+
+  const durationMinutes =
+    durationFromServiceCall ||
+    fallbackJob.durationMinutes ||
+    fallbackJob.durationInMinutes ||
+    60;
+
+  const location =
+    locationFromServiceCall ||
+    fallbackJob.location ||
+    {
+      latitude: 38.0344,
+      longitude: 23.1283
+    };
+
+  const mandatorySkills =
+    mandatorySkillsFromServiceCall.length > 0
+      ? mandatorySkillsFromServiceCall
+      : fallbackJob.mandatorySkills || [];
+
+  const optimizationPayload = {
+    job: {
+      durationMinutes,
+      location,
+      mandatorySkills
+    },
+    resources: reqBody.resources || {
+      filters: {
+        includeInternalPersons: true,
+        includeCrowdPersons: false,
+        includeMandatorySkills: true
+      }
+    },
+    slots: generateRollingSlots(),
+    options: reqBody.options || {
+      maxResultsPerSlot: 5,
+      defaultDrivingTimeMinutes: 30
+    },
+    policy: reqBody.policy || "DistanceAndSkills"
+  };
+
+  return optimizationPayload;
+}
+
 app.get("/health", (req, res) => {
   res.json({
     status: "ok",
@@ -228,16 +332,29 @@ app.post("/score-with-org-level", async (req, res) => {
 
     const token = await getFsmToken();
 
-    const generatedSlots = generateRollingSlots();
+    let serviceCall = null;
+    let serviceCallResponse = null;
 
-    const optimizationPayload = {
-      ...req.body,
-      slots: generatedSlots
-    };
+    if (req.body.serviceCallId) {
+      serviceCallResponse = await getServiceCall(req.body.serviceCallId, token);
 
-    console.log("Generated 15-minute rolling slots:", JSON.stringify(generatedSlots, null, 2));
+      console.log("ServiceCall response:", JSON.stringify(serviceCallResponse, null, 2));
 
-    console.log("Calling optimization endpoint...");
+      const serviceCallWrapper = getFirstItem(serviceCallResponse);
+      serviceCall = unwrapServiceCall(serviceCallWrapper);
+
+      if (!serviceCall) {
+        return res.status(400).json({
+          error: "ServiceCall not found",
+          serviceCallId: req.body.serviceCallId,
+          serviceCallResponse
+        });
+      }
+    }
+
+    const optimizationPayload = buildOptimizationPayload(req.body, serviceCall);
+
+    console.log("Generated dynamic 7-day slot:", JSON.stringify(optimizationPayload.slots, null, 2));
     console.log("Optimization payload:", JSON.stringify(optimizationPayload, null, 2));
 
     const scoreResponse = await axios.post(
@@ -252,17 +369,21 @@ app.post("/score-with-org-level", async (req, res) => {
 
     console.log("Optimization response:", JSON.stringify(scoreData, null, 2));
 
-    const firstResult = scoreData.results?.[0];
+    const availableResults = Array.isArray(scoreData.results)
+      ? scoreData.results.filter((item) => item && item.resource && item.start && item.end)
+      : [];
 
-    if (!firstResult || !firstResult.resource) {
+    const bestResult = availableResults[0];
+
+    if (!bestResult) {
       return res.status(400).json({
-        error: "Optimization response does not contain results[0].resource",
-        generatedSlots,
+        error: "No available optimization result found",
+        optimizationPayload,
         scoreData
       });
     }
 
-    const resourceId = firstResult.resource;
+    const resourceId = bestResult.resource;
 
     const personResponse = await getPerson(resourceId, token);
 
@@ -288,41 +409,27 @@ app.post("/score-with-org-level", async (req, res) => {
       });
     }
 
-    const availableResults = Array.isArray(scoreData.results)
-  ? scoreData.results.filter((item) => item && item.resource && item.start && item.end)
-  : [];
+    const alternatives = availableResults
+      .slice(1, 6)
+      .map((item) => ({
+        slot: item.slot || null,
+        resource: item.resource,
+        start: item.start,
+        end: item.end,
+        trip: item.trip || null,
+        score: item.score || null
+      }));
 
-const bestResult = availableResults[0];
-
-if (!bestResult) {
-  return res.status(400).json({
-    error: "No available optimization result found",
-    generatedSlots,
-    scoreData
-  });
-}
-
-const alternatives = availableResults
-  .slice(1, 6)
-  .map((item) => ({
-    slot: item.slot || null,
-    resource: item.resource,
-    start: item.start,
-    end: item.end,
-    trip: item.trip || null,
-    score: item.score || null
-  }));
-
-const enrichedResponse = {
-  results: [
-    {
-      ...bestResult,
-      orgLevel
-    }
-  ],
-  alternatives,
-  generatedSlotsCount: generatedSlots.length
-};
+    const enrichedResponse = {
+      results: [
+        {
+          ...bestResult,
+          orgLevel
+        }
+      ],
+      alternatives,
+      generatedSlotsCount: optimizationPayload.slots.length
+    };
 
     console.log("Returning enriched response:", JSON.stringify(enrichedResponse, null, 2));
 
@@ -348,7 +455,7 @@ const port = Number(PORT);
 
 const server = app.listen(port, host, () => {
   console.log(`FSM score wrapper running on ${host}:${port}`);
-  console.log(`Health check: /health`);
+  console.log("Health check: /health");
 });
 
 server.on("error", (error) => {
