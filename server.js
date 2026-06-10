@@ -16,12 +16,10 @@ const {
   FSM_COMPANY_ID,
   FSM_COMPANY_NAME,
   OPTIMIZATION_URL,
-  FSM_REQUIREMENT_DTO = "Requirement.10"
+  FSM_REQUIREMENT_DTO = "Requirement.10",
+  FSM_PERSON_DTO = "Person.25",
+  FSM_SERVICE_CALL_DTO = "ServiceCall.27"
 } = process.env;
-
-const PROBLEM_TYPE_SKILL_MAP = {
-  FTTH: ["FTTH", "10173"]
-};
 
 if (
   !FSM_BASE_URL ||
@@ -43,7 +41,9 @@ if (
     FSM_COMPANY_ID: !!FSM_COMPANY_ID,
     FSM_COMPANY_NAME: !!FSM_COMPANY_NAME,
     OPTIMIZATION_URL: !!OPTIMIZATION_URL,
-    FSM_REQUIREMENT_DTO
+    FSM_REQUIREMENT_DTO,
+    FSM_PERSON_DTO,
+    FSM_SERVICE_CALL_DTO
   });
   process.exit(1);
 }
@@ -59,6 +59,14 @@ function fsmHeaders(token) {
     "x-company-id": FSM_COMPANY_ID,
     "x-company-name": FSM_COMPANY_NAME
   };
+}
+
+function dataApiUrl(dtoName, dtoVersion, query) {
+  return (
+    `${FSM_BASE_URL}/api/data/v4/${dtoName}` +
+    `?dtos=${encodeURIComponent(dtoVersion)}` +
+    `&query=${encodeURIComponent(query)}`
+  );
 }
 
 function generateRollingSlots() {
@@ -160,12 +168,14 @@ async function getFsmToken() {
   return response.data.access_token;
 }
 
-async function getPerson(resourceId, token) {
-  console.log("Getting Person for resource:", resourceId);
+async function getServiceCall(serviceCallId, token) {
+  console.log("Getting ServiceCall:", serviceCallId);
 
-  const url =
-    `${FSM_BASE_URL}/api/data/v4/Person` +
-    `?dtos=Person.25&query=${encodeURIComponent(`id="${resourceId}"`)}`;
+  const url = dataApiUrl(
+    "ServiceCall",
+    FSM_SERVICE_CALL_DTO,
+    `id="${serviceCallId}"`
+  );
 
   const response = await axios.get(url, {
     headers: fsmHeaders(token)
@@ -174,12 +184,14 @@ async function getPerson(resourceId, token) {
   return response.data;
 }
 
-async function getServiceCall(serviceCallId, token) {
-  console.log("Getting ServiceCall:", serviceCallId);
+async function getPerson(resourceId, token) {
+  console.log("Getting Person for resource:", resourceId);
 
-  const url =
-    `${FSM_BASE_URL}/api/data/v4/ServiceCall` +
-    `?dtos=ServiceCall.27&query=${encodeURIComponent(`id="${serviceCallId}"`)}`;
+  const url = dataApiUrl(
+    "Person",
+    FSM_PERSON_DTO,
+    `id="${resourceId}"`
+  );
 
   const response = await axios.get(url, {
     headers: fsmHeaders(token)
@@ -192,19 +204,20 @@ async function getRequirementsForServiceCall(serviceCallId, token) {
   console.log("Getting Requirements for ServiceCall:", serviceCallId);
 
   const queriesToTry = [
-    `serviceCall.id="${serviceCallId}"`,
-    `serviceCall="${serviceCallId}"`,
     `object.objectId="${serviceCallId}"`,
+    `object.objectId="${serviceCallId}" AND object.objectType="SERVICECALL"`,
+    `object.objectId="${serviceCallId}" and object.objectType="SERVICECALL"`,
     `object="${serviceCallId}"`,
-    `objectId="${serviceCallId}"`
+    `objectId="${serviceCallId}"`,
+    `serviceCall.id="${serviceCallId}"`,
+    `serviceCall="${serviceCallId}"`
   ];
 
-  const allErrors = [];
+  const errors = [];
+  const emptyResponses = [];
 
   for (const query of queriesToTry) {
-    const url =
-      `${FSM_BASE_URL}/api/data/v4/Requirement` +
-      `?dtos=${FSM_REQUIREMENT_DTO}&query=${encodeURIComponent(query)}`;
+    const url = dataApiUrl("Requirement", FSM_REQUIREMENT_DTO, query);
 
     try {
       console.log("Trying Requirement query:", query);
@@ -213,14 +226,28 @@ async function getRequirementsForServiceCall(serviceCallId, token) {
         headers: fsmHeaders(token)
       });
 
-      console.log("Requirement response:", JSON.stringify(response.data, null, 2));
+      const data = response.data;
+      const rows = Array.isArray(data?.data) ? data.data : [];
 
-      return response.data;
+      console.log("Requirement query result count:", rows.length);
+      console.log("Requirement response:", JSON.stringify(data, null, 2));
+
+      if (rows.length > 0) {
+        return {
+          response: data,
+          queryUsed: query
+        };
+      }
+
+      emptyResponses.push({
+        query,
+        response: data
+      });
     } catch (error) {
       const status = error.response?.status || null;
       const data = error.response?.data || error.message;
 
-      allErrors.push({
+      errors.push({
         query,
         status,
         data
@@ -235,11 +262,13 @@ async function getRequirementsForServiceCall(serviceCallId, token) {
     }
   }
 
-  console.log("All Requirement queries failed:", JSON.stringify(allErrors, null, 2));
-
   return {
-    data: [],
-    errors: allErrors
+    response: {
+      data: []
+    },
+    queryUsed: null,
+    errors,
+    emptyResponses
   };
 }
 
@@ -262,6 +291,28 @@ function unwrapServiceCall(serviceCallWrapper) {
   );
 }
 
+function unwrapPerson(personWrapper) {
+  if (!personWrapper) return null;
+
+  return (
+    personWrapper.person ||
+    personWrapper.Person ||
+    personWrapper.unifiedPerson ||
+    personWrapper.UnifiedPerson ||
+    personWrapper
+  );
+}
+
+function unwrapRequirement(requirementWrapper) {
+  if (!requirementWrapper) return null;
+
+  return (
+    requirementWrapper.requirement ||
+    requirementWrapper.Requirement ||
+    requirementWrapper
+  );
+}
+
 function normalizeOrgLevel(orgLevel) {
   if (!orgLevel) return null;
 
@@ -277,10 +328,9 @@ function normalizeOrgLevel(orgLevel) {
 }
 
 function extractOrgLevel(personWrapper) {
-  const person =
-    personWrapper.person ||
-    personWrapper.unifiedPerson ||
-    personWrapper;
+  const person = unwrapPerson(personWrapper);
+
+  if (!person) return null;
 
   const rawOrgLevel =
     person.orgLevelIds?.[0] ||
@@ -363,57 +413,49 @@ function addSkillIfValid(skills, value) {
   skills.push(cleaned);
 }
 
-function mapProblemTypeToSkills(problemTypeName) {
-  if (!problemTypeName) return [];
+function extractSkillFromRequirement(requirementWrapper) {
+  const requirement = unwrapRequirement(requirementWrapper);
 
-  const key = String(problemTypeName).trim().toUpperCase();
-
-  return PROBLEM_TYPE_SKILL_MAP[key] || [problemTypeName];
-}
-
-function extractMandatorySkillsFromServiceCall(serviceCall) {
-  if (!serviceCall) return [];
-
-  const possibleRequirements = [
-    serviceCall.requirements,
-    serviceCall.mandatorySkills,
-    serviceCall.skills,
-    serviceCall.requiredSkills
-  ];
-
-  const requirements =
-    possibleRequirements.find((item) => Array.isArray(item)) || [];
+  if (!requirement) {
+    return [];
+  }
 
   const skills = [];
 
-  for (const requirement of requirements) {
-    const skill = requirement.skill || requirement;
+  const possibleSkillObjects = [
+    requirement.skill,
+    requirement.mandatorySkill,
+    requirement.requiredSkill
+  ];
+
+  for (const skill of possibleSkillObjects) {
+    if (!skill) continue;
 
     if (typeof skill === "string") {
       addSkillIfValid(skills, skill);
       continue;
     }
 
-    if (skill && typeof skill === "object") {
+    if (typeof skill === "object") {
       addSkillIfValid(skills, skill.code);
       addSkillIfValid(skills, skill.name);
       addSkillIfValid(skills, skill.externalId);
       addSkillIfValid(skills, skill.id);
-    }
-
-    if (requirement && typeof requirement === "object") {
-      addSkillIfValid(skills, requirement.skillCode);
-      addSkillIfValid(skills, requirement.skillName);
-      addSkillIfValid(skills, requirement.skillId);
+      addSkillIfValid(skills, skill.refId);
     }
   }
 
-  if (skills.length === 0 && serviceCall.problemTypeName) {
-    const mappedSkills = mapProblemTypeToSkills(serviceCall.problemTypeName);
-    skills.push(...mappedSkills);
-  }
+  addSkillIfValid(skills, requirement.skillCode);
+  addSkillIfValid(skills, requirement.skillName);
+  addSkillIfValid(skills, requirement.skillId);
+  addSkillIfValid(skills, requirement.mandatorySkillCode);
+  addSkillIfValid(skills, requirement.mandatorySkillName);
+  addSkillIfValid(skills, requirement.mandatorySkillId);
+  addSkillIfValid(skills, requirement.requiredSkillCode);
+  addSkillIfValid(skills, requirement.requiredSkillName);
+  addSkillIfValid(skills, requirement.requiredSkillId);
 
-  return [...new Set(skills.filter(Boolean))];
+  return [...new Set(skills)];
 }
 
 function extractMandatorySkillsFromRequirements(requirementResponse) {
@@ -424,48 +466,94 @@ function extractMandatorySkillsFromRequirements(requirementResponse) {
   const skills = [];
 
   for (const row of rows) {
-    const requirement =
-      row.requirement ||
-      row.Requirement ||
-      row;
+    const requirement = unwrapRequirement(row);
 
-    const skill =
-      requirement.skill ||
-      requirement.mandatorySkill ||
-      requirement.requiredSkill ||
-      null;
+    if (!requirement) continue;
 
-    if (typeof skill === "string") {
-      addSkillIfValid(skills, skill);
+    if (requirement.mandatory === false) {
       continue;
     }
 
-    if (skill && typeof skill === "object") {
-      addSkillIfValid(skills, skill.code);
-      addSkillIfValid(skills, skill.name);
-      addSkillIfValid(skills, skill.externalId);
-      addSkillIfValid(skills, skill.id);
-    }
+    const extracted = extractSkillFromRequirement(row);
 
-    if (requirement && typeof requirement === "object") {
-      addSkillIfValid(skills, requirement.skillCode);
-      addSkillIfValid(skills, requirement.skillName);
-      addSkillIfValid(skills, requirement.skillId);
+    skills.push(...extracted);
+  }
+
+  return [...new Set(skills.filter(Boolean))];
+}
+
+function extractPersonSkills(personWrapper) {
+  const person = unwrapPerson(personWrapper);
+
+  if (!person) return [];
+
+  const skills = [];
+
+  const skillCollections = [
+    person.skills,
+    person.mandatorySkills,
+    person.requiredSkills
+  ];
+
+  for (const collection of skillCollections) {
+    if (!Array.isArray(collection)) continue;
+
+    for (const item of collection) {
+      if (typeof item === "string") {
+        addSkillIfValid(skills, item);
+        continue;
+      }
+
+      if (item && typeof item === "object") {
+        addSkillIfValid(skills, item.code);
+        addSkillIfValid(skills, item.name);
+        addSkillIfValid(skills, item.externalId);
+        addSkillIfValid(skills, item.id);
+        addSkillIfValid(skills, item.refId);
+
+        if (item.skill && typeof item.skill === "object") {
+          addSkillIfValid(skills, item.skill.code);
+          addSkillIfValid(skills, item.skill.name);
+          addSkillIfValid(skills, item.skill.externalId);
+          addSkillIfValid(skills, item.skill.id);
+          addSkillIfValid(skills, item.skill.refId);
+        }
+
+        if (typeof item.skill === "string") {
+          addSkillIfValid(skills, item.skill);
+        }
+      }
     }
   }
 
   return [...new Set(skills.filter(Boolean))];
 }
 
-function buildOptimizationPayload(
-  reqBody,
-  serviceCall,
-  mandatorySkillsFromRequirements = []
-) {
+function compareSkills(requiredSkills, personSkills) {
+  const requiredSet = new Set(requiredSkills.map((item) => String(item).toLowerCase()));
+  const personSet = new Set(personSkills.map((item) => String(item).toLowerCase()));
+
+  const matched = [];
+  const missing = [];
+
+  for (const skill of requiredSkills) {
+    if (personSet.has(String(skill).toLowerCase())) {
+      matched.push(skill);
+    } else {
+      missing.push(skill);
+    }
+  }
+
+  return {
+    matched,
+    missing,
+    allMatched: missing.length === 0
+  };
+}
+
+function buildOptimizationPayload(reqBody, serviceCall, mandatorySkillsFromRequirements) {
   const durationFromServiceCall = extractDurationFromServiceCall(serviceCall);
   const locationFromServiceCall = extractLocationFromServiceCall(serviceCall);
-  const mandatorySkillsFromServiceCall =
-    extractMandatorySkillsFromServiceCall(serviceCall);
 
   const fallbackJob = reqBody.job || {};
 
@@ -486,11 +574,7 @@ function buildOptimizationPayload(
   const mandatorySkills =
     mandatorySkillsFromRequirements.length > 0
       ? mandatorySkillsFromRequirements
-      : mandatorySkillsFromServiceCall.length > 0
-        ? mandatorySkillsFromServiceCall
-        : fallbackJob.mandatorySkills || [];
-
-  const includeMandatorySkills = mandatorySkills.length > 0;
+      : fallbackJob.mandatorySkills || [];
 
   return {
     job: {
@@ -502,7 +586,7 @@ function buildOptimizationPayload(
       filters: {
         includeInternalPersons: true,
         includeCrowdPersons: false,
-        includeMandatorySkills
+        includeMandatorySkills: mandatorySkills.length > 0
       }
     },
     slots: generateRollingSlots(),
@@ -528,9 +612,15 @@ app.post("/score-with-org-level", async (req, res) => {
 
     const token = await getFsmToken();
 
+    if (!req.body.serviceCallId && !req.body.job) {
+      return res.status(400).json({
+        error: "Missing serviceCallId or fallback job payload"
+      });
+    }
+
     let serviceCall = null;
     let serviceCallResponse = null;
-    let requirementResponse = null;
+    let requirementLookup = null;
     let mandatorySkillsFromRequirements = [];
 
     if (req.body.serviceCallId) {
@@ -549,18 +639,31 @@ app.post("/score-with-org-level", async (req, res) => {
         });
       }
 
-      requirementResponse = await getRequirementsForServiceCall(
+      requirementLookup = await getRequirementsForServiceCall(
         req.body.serviceCallId,
         token
       );
 
       mandatorySkillsFromRequirements =
-        extractMandatorySkillsFromRequirements(requirementResponse);
+        extractMandatorySkillsFromRequirements(requirementLookup.response);
 
+      console.log("Requirement query used:", requirementLookup.queryUsed);
       console.log(
         "Mandatory skills from Requirement DTO:",
         mandatorySkillsFromRequirements
       );
+
+      if (mandatorySkillsFromRequirements.length === 0) {
+        return res.status(400).json({
+          error: "No mandatory skills found on Requirement DTO for ServiceCall",
+          serviceCallId: req.body.serviceCallId,
+          requirementQueryUsed: requirementLookup.queryUsed,
+          requirementResponse: requirementLookup.response,
+          requirementErrors: requirementLookup.errors || [],
+          hint:
+            "Check Requirement columns for skill field and query object.objectId = ServiceCall ID."
+        });
+      }
     }
 
     const optimizationPayload = buildOptimizationPayload(
@@ -638,6 +741,12 @@ app.post("/score-with-org-level", async (req, res) => {
       });
     }
 
+    const personSkills = extractPersonSkills(personWrapper);
+    const skillMatch = compareSkills(
+      optimizationPayload.job.mandatorySkills,
+      personSkills
+    );
+
     const alternatives = availableResults
       .slice(1, 6)
       .map((item) => ({
@@ -653,12 +762,16 @@ app.post("/score-with-org-level", async (req, res) => {
       results: [
         {
           ...bestResult,
-          orgLevel
+          orgLevel,
+          requiredSkills: optimizationPayload.job.mandatorySkills,
+          personSkills,
+          skillMatch
         }
       ],
       alternatives,
       generatedSlotsCount: optimizationPayload.slots.length,
-      mandatorySkillsUsed: optimizationPayload.job.mandatorySkills
+      mandatorySkillsUsed: optimizationPayload.job.mandatorySkills,
+      requirementQueryUsed: requirementLookup?.queryUsed || null
     };
 
     console.log(
