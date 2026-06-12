@@ -936,26 +936,6 @@ function buildSkillMatrixKey(skills) {
     .join("|");
 }
 
-function isPostalCodeSkill(skill) {
-  return /^\d{4,6}$/.test(
-    String(skill || "").trim()
-  );
-}
-
-function getOptimizationMandatorySkills(skills) {
-  return [
-    ...new Set(
-      skills
-        .map((skill) => String(skill).trim())
-        .filter(Boolean)
-        .filter(
-          (skill) =>
-            !isPostalCodeSkill(skill)
-        )
-    )
-  ];
-}
-
 function generateRollingSlots() {
   const timezone = "Europe/Athens";
   const daysAhead = 7;
@@ -1649,16 +1629,11 @@ app.post(
         });
       }
 
-      const optimizationMandatorySkills =
-        getOptimizationMandatorySkills(
-          mandatorySkills
-        );
-
       const optimizationPayload =
         buildOptimizationPayload(
           request.body,
           serviceCall,
-          optimizationMandatorySkills
+          mandatorySkills
         );
 
       console.log(
@@ -1668,13 +1643,8 @@ app.post(
       );
 
       console.log(
-        "Mandatory skills used for matrix:",
+        "Mandatory skills used:",
         mandatorySkills
-      );
-
-      console.log(
-        "Mandatory skills sent to Optimization:",
-        optimizationMandatorySkills
       );
 
       console.log(
@@ -1765,8 +1735,6 @@ app.post(
           matrixKey,
           mandatorySkillsUsed:
             mandatorySkills,
-          optimizationMandatorySkillsUsed:
-            optimizationMandatorySkills,
           generatedSlotsCount:
             optimizationPayload
               .slots.length,
@@ -1836,8 +1804,6 @@ app.post(
           matrixKey,
           mandatorySkillsUsed:
             mandatorySkills,
-          optimizationMandatorySkillsUsed:
-            optimizationMandatorySkills,
           resources:
             [
               ...new Map(
@@ -1877,8 +1843,6 @@ app.post(
           matrixKey,
           mandatorySkillsUsed:
             mandatorySkills,
-          optimizationMandatorySkillsUsed:
-            optimizationMandatorySkills,
           availableContractors
         });
       }
@@ -1892,8 +1856,6 @@ app.post(
           matrixKey,
           mandatorySkillsUsed:
             mandatorySkills,
-          optimizationMandatorySkillsUsed:
-            optimizationMandatorySkills,
           availableContractors,
           allocation
         });
@@ -1943,8 +1905,6 @@ app.post(
               bestResult.contractor,
             requiredSkills:
               mandatorySkills,
-            optimizationRequiredSkills:
-              optimizationMandatorySkills,
             selectionReason:
               allocation.reason
           }
@@ -1979,9 +1939,6 @@ app.post(
 
         mandatorySkillsUsed:
           mandatorySkills,
-
-        optimizationMandatorySkillsUsed:
-          optimizationMandatorySkills,
 
         requirementQueryUsed:
           requirementLookup
