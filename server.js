@@ -16,22 +16,29 @@ const {
   FSM_COMPANY_ID,
   FSM_COMPANY_NAME,
   OPTIMIZATION_URL,
+
   FSM_REQUIREMENT_DTO = "Requirement.10",
   FSM_PERSON_DTO = "Person.25",
+  FSM_UNIFIED_PERSON_DTO = "UnifiedPerson.13",
   FSM_SERVICE_CALL_DTO = "ServiceCall.27",
   FSM_TAG_DTO = "Tag.10"
 } = process.env;
 
 /*
- * Matrica zavisi isključivo od kombinacije mandatory skillova.
+ * UDF meta ID za polje PersonContractor
+ * na UnifiedPerson objektu.
+ */
+const PERSON_CONTRACTOR_UDF_META_ID =
+  "69EBF33B64E94531A4932604E1097E58";
+
+/*
+ * Matrica zavisi isključivo od kombinacije skillova.
  *
- * Ključ se pravi tako što se skillovi:
- * - uklone duplikati
- * - sortiraju
- * - spoje znakom |
+ * Jedan skill:
+ * 10010
  *
- * Primer:
- * ["10173", "10010"] => "10010|10173"
+ * Više skillova:
+ * 10010|10173
  */
 const CONTRACTOR_ALLOCATION_MATRIX = {
   "10010": {
@@ -40,21 +47,19 @@ const CONTRACTOR_ALLOCATION_MATRIX = {
   }
 
   /*
-   * Kasnije možeš dodati:
-   *
-   * "10010|10173": {
-   *   ICOM: 60,
-   *   SAT_PRAXIS: 40
-   * }
-   */
+  "10010|10173": {
+    ICOM: 60,
+    SAT_PRAXIS: 40
+  }
+  */
 };
 
 /*
- * Ravnomerno raspoređena sekvenca za odnos 70:30.
+ * Ravnomerno raspoređena sekvenca 70:30.
  *
- * U svakih 10 dodela:
- * ICOM dobija 7
- * SAT_PRAXIS dobija 3
+ * U svakih 10 uspešnih dodela:
+ * ICOM dobija 7,
+ * SAT_PRAXIS dobija 3.
  */
 const CONTRACTOR_ALLOCATION_SEQUENCES = {
   "10010": [
@@ -74,39 +79,46 @@ const CONTRACTOR_ALLOCATION_SEQUENCES = {
 /*
  * Privremeni brojači u memoriji.
  *
- * Posle Render restarta vraćaju se na nulu.
- * Za produkciju ćemo ih prebaciti u PostgreSQL.
+ * Posle Render restarta kreću od nule.
+ * Za produkciju ćemo ih kasnije prebaciti u bazu.
  */
 const allocationCounters = {};
 
-if (
-  !FSM_BASE_URL ||
-  !FSM_CLIENT_ID ||
-  !FSM_CLIENT_SECRET ||
-  !FSM_ACCOUNT_ID ||
-  !FSM_ACCOUNT_NAME ||
-  !FSM_COMPANY_ID ||
-  !FSM_COMPANY_NAME ||
-  !OPTIMIZATION_URL
-) {
-  console.error("Missing required environment values.");
+validateEnvironment();
 
-  console.error({
-    FSM_BASE_URL: !!FSM_BASE_URL,
-    FSM_CLIENT_ID: !!FSM_CLIENT_ID,
-    FSM_CLIENT_SECRET: !!FSM_CLIENT_SECRET,
-    FSM_ACCOUNT_ID: !!FSM_ACCOUNT_ID,
-    FSM_ACCOUNT_NAME: !!FSM_ACCOUNT_NAME,
-    FSM_COMPANY_ID: !!FSM_COMPANY_ID,
-    FSM_COMPANY_NAME: !!FSM_COMPANY_NAME,
-    OPTIMIZATION_URL: !!OPTIMIZATION_URL,
+function validateEnvironment() {
+  const missing = [];
+
+  const requiredValues = {
+    FSM_BASE_URL,
+    FSM_CLIENT_ID,
+    FSM_CLIENT_SECRET,
+    FSM_ACCOUNT_ID,
+    FSM_ACCOUNT_NAME,
+    FSM_COMPANY_ID,
+    FSM_COMPANY_NAME,
+    OPTIMIZATION_URL
+  };
+
+  for (const [key, value] of Object.entries(requiredValues)) {
+    if (!value) {
+      missing.push(key);
+    }
+  }
+
+  if (missing.length > 0) {
+    console.error("Missing required environment values:", missing);
+    process.exit(1);
+  }
+
+  console.log("Environment configuration loaded.");
+  console.log({
     FSM_REQUIREMENT_DTO,
     FSM_PERSON_DTO,
+    FSM_UNIFIED_PERSON_DTO,
     FSM_SERVICE_CALL_DTO,
     FSM_TAG_DTO
   });
-
-  process.exit(1);
 }
 
 function fsmHeaders(token) {
@@ -128,90 +140,6 @@ function dataApiUrl(dtoName, dtoVersion, query) {
     `?dtos=${encodeURIComponent(dtoVersion)}` +
     `&query=${encodeURIComponent(query)}`
   );
-}
-
-function buildSkillMatrixKey(skills) {
-  return [...new Set(skills.map((skill) => String(skill).trim()))]
-    .filter(Boolean)
-    .sort()
-    .join("|");
-}
-
-function generateRollingSlots() {
-  const timezone = "Europe/Athens";
-  const daysAhead = 7;
-
-  const workingDayStartHour = 8;
-  const workingDayEndHour = 18;
-
-  const startBufferMinutes = 5;
-  const slotDurationMinutes = 30;
-
-  const now = DateTime.now()
-    .setZone(timezone)
-    .plus({ minutes: startBufferMinutes });
-
-  const slots = [];
-
-  for (let dayOffset = 0; dayOffset < daysAhead; dayOffset++) {
-    const day = now.plus({ days: dayOffset });
-
-    let dayStart = day.set({
-      hour: workingDayStartHour,
-      minute: 0,
-      second: 0,
-      millisecond: 0
-    });
-
-    const dayEnd = day.set({
-      hour: workingDayEndHour,
-      minute: 0,
-      second: 0,
-      millisecond: 0
-    });
-
-    if (dayOffset === 0 && now > dayStart) {
-      dayStart = now;
-    }
-
-    if (
-      dayStart.second !== 0 ||
-      dayStart.millisecond !== 0 ||
-      dayStart.minute % slotDurationMinutes !== 0
-    ) {
-      const minutesToAdd =
-        slotDurationMinutes - (dayStart.minute % slotDurationMinutes);
-
-      dayStart = dayStart
-        .plus({ minutes: minutesToAdd })
-        .set({
-          second: 0,
-          millisecond: 0
-        });
-    } else {
-      dayStart = dayStart.set({
-        second: 0,
-        millisecond: 0
-      });
-    }
-
-    let slotStart = dayStart;
-
-    while (slotStart.plus({ minutes: slotDurationMinutes }) <= dayEnd) {
-      const slotEnd = slotStart.plus({
-        minutes: slotDurationMinutes
-      });
-
-      slots.push({
-        start: slotStart.toUTC().toISO(),
-        end: slotEnd.toUTC().toISO()
-      });
-
-      slotStart = slotEnd;
-    }
-  }
-
-  return slots;
 }
 
 async function getFsmToken() {
@@ -266,70 +194,20 @@ async function getPerson(resourceId, token) {
   return response.data;
 }
 
-async function getTag(tagId, token) {
-  console.log("Getting Tag:", tagId);
+async function getUnifiedPerson(resourceId, token) {
+  console.log("Getting UnifiedPerson for resource:", resourceId);
 
-  const queriesToTry = [
-    `id="${tagId}"`,
-    `externalId="${tagId}"`,
-    `name="${tagId}"`
-  ];
+  const url = dataApiUrl(
+    "UnifiedPerson",
+    FSM_UNIFIED_PERSON_DTO,
+    `id="${resourceId}"`
+  );
 
-  const errors = [];
+  const response = await axios.get(url, {
+    headers: fsmHeaders(token)
+  });
 
-  for (const query of queriesToTry) {
-    const url = dataApiUrl("Tag", FSM_TAG_DTO, query);
-
-    try {
-      console.log("Trying Tag query:", query);
-
-      const response = await axios.get(url, {
-        headers: fsmHeaders(token)
-      });
-
-      const data = response.data;
-      const rows = Array.isArray(data?.data) ? data.data : [];
-
-      console.log("Tag query result count:", rows.length);
-
-      if (rows.length > 0) {
-        console.log(
-          "Tag response:",
-          JSON.stringify(data, null, 2)
-        );
-
-        return {
-          response: data,
-          queryUsed: query,
-          errors
-        };
-      }
-    } catch (error) {
-      const status = error.response?.status || null;
-      const data = error.response?.data || error.message;
-
-      errors.push({
-        query,
-        status,
-        data
-      });
-
-      console.log(
-        "Tag query failed:",
-        query,
-        status,
-        JSON.stringify(data)
-      );
-    }
-  }
-
-  return {
-    response: {
-      data: []
-    },
-    queryUsed: null,
-    errors
-  };
+  return response.data;
 }
 
 async function getRequirementsForServiceCall(serviceCallId, token) {
@@ -345,7 +223,6 @@ async function getRequirementsForServiceCall(serviceCallId, token) {
   ];
 
   const errors = [];
-  const emptyResponses = [];
 
   for (const query of queriesToTry) {
     const url = dataApiUrl(
@@ -361,8 +238,11 @@ async function getRequirementsForServiceCall(serviceCallId, token) {
         headers: fsmHeaders(token)
       });
 
-      const data = response.data;
-      const rows = Array.isArray(data?.data) ? data.data : [];
+      const responseData = response.data;
+
+      const rows = Array.isArray(responseData?.data)
+        ? responseData.data
+        : [];
 
       console.log(
         "Requirement query result count:",
@@ -372,36 +252,30 @@ async function getRequirementsForServiceCall(serviceCallId, token) {
       if (rows.length > 0) {
         console.log(
           "Requirement response:",
-          JSON.stringify(data, null, 2)
+          JSON.stringify(responseData, null, 2)
         );
 
         return {
-          response: data,
+          response: responseData,
           queryUsed: query,
-          errors,
-          emptyResponses
+          errors
         };
       }
-
-      emptyResponses.push({
-        query,
-        response: data
-      });
     } catch (error) {
-      const status = error.response?.status || null;
-      const data = error.response?.data || error.message;
+      const errorData =
+        error.response?.data ||
+        error.message;
 
       errors.push({
         query,
-        status,
-        data
+        status: error.response?.status || null,
+        data: errorData
       });
 
       console.log(
         "Requirement query failed:",
         query,
-        status,
-        JSON.stringify(data)
+        JSON.stringify(errorData)
       );
     }
   }
@@ -411,17 +285,103 @@ async function getRequirementsForServiceCall(serviceCallId, token) {
       data: []
     },
     queryUsed: null,
-    errors,
-    emptyResponses
+    errors
+  };
+}
+
+async function getTag(tagId, token) {
+  console.log("Getting Tag:", tagId);
+
+  const queriesToTry = [
+    `id="${tagId}"`,
+    `externalId="${tagId}"`,
+    `name="${tagId}"`
+  ];
+
+  const errors = [];
+
+  for (const query of queriesToTry) {
+    const url = dataApiUrl(
+      "Tag",
+      FSM_TAG_DTO,
+      query
+    );
+
+    try {
+      console.log("Trying Tag query:", query);
+
+      const response = await axios.get(url, {
+        headers: fsmHeaders(token)
+      });
+
+      const responseData = response.data;
+
+      const rows = Array.isArray(responseData?.data)
+        ? responseData.data
+        : [];
+
+      console.log("Tag query result count:", rows.length);
+
+      if (rows.length > 0) {
+        console.log(
+          "Tag response:",
+          JSON.stringify(responseData, null, 2)
+        );
+
+        return {
+          response: responseData,
+          queryUsed: query,
+          errors
+        };
+      }
+    } catch (error) {
+      const errorData =
+        error.response?.data ||
+        error.message;
+
+      errors.push({
+        query,
+        status: error.response?.status || null,
+        data: errorData
+      });
+
+      console.log(
+        "Tag query failed:",
+        query,
+        JSON.stringify(errorData)
+      );
+    }
+  }
+
+  return {
+    response: {
+      data: []
+    },
+    queryUsed: null,
+    errors
   };
 }
 
 function getFirstItem(response) {
-  if (Array.isArray(response)) return response[0];
-  if (Array.isArray(response?.data)) return response.data[0];
-  if (Array.isArray(response?.items)) return response.items[0];
-  if (Array.isArray(response?.values)) return response.values[0];
-  if (Array.isArray(response?.records)) return response.records[0];
+  if (Array.isArray(response)) {
+    return response[0] || null;
+  }
+
+  if (Array.isArray(response?.data)) {
+    return response.data[0] || null;
+  }
+
+  if (Array.isArray(response?.items)) {
+    return response.items[0] || null;
+  }
+
+  if (Array.isArray(response?.values)) {
+    return response.values[0] || null;
+  }
+
+  if (Array.isArray(response?.records)) {
+    return response.records[0] || null;
+  }
 
   return null;
 }
@@ -442,6 +402,14 @@ function unwrapPerson(wrapper) {
   return (
     wrapper.person ||
     wrapper.Person ||
+    wrapper
+  );
+}
+
+function unwrapUnifiedPerson(wrapper) {
+  if (!wrapper) return null;
+
+  return (
     wrapper.unifiedPerson ||
     wrapper.UnifiedPerson ||
     wrapper
@@ -468,8 +436,121 @@ function unwrapTag(wrapper) {
   );
 }
 
+function addStringIfValid(values, value) {
+  if (typeof value !== "string") {
+    return;
+  }
+
+  const cleaned = value.trim();
+
+  if (cleaned) {
+    values.push(cleaned);
+  }
+}
+
+function normalizeContractorCode(value) {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = String(value)
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, "_")
+    .replace(/-/g, "_");
+
+  const aliases = {
+    ICOM: "ICOM",
+    ICOM_DOO: "ICOM",
+
+    SATPRAXIS: "SAT_PRAXIS",
+    SAT_PRAXIS: "SAT_PRAXIS",
+    SAT_PRAXIS_DOO: "SAT_PRAXIS"
+  };
+
+  return aliases[normalized] || normalized;
+}
+
+function normalizeMetaId(meta) {
+  if (!meta) {
+    return null;
+  }
+
+  if (typeof meta === "string") {
+    return meta;
+  }
+
+  if (typeof meta === "object") {
+    return (
+      meta.id ||
+      meta.refId ||
+      meta.objectId ||
+      meta.externalId ||
+      null
+    );
+  }
+
+  return null;
+}
+
+function extractPersonContractor(unifiedPersonWrapper) {
+  const unifiedPerson =
+    unwrapUnifiedPerson(unifiedPersonWrapper);
+
+  if (!unifiedPerson) {
+    return null;
+  }
+
+  const udfValues = unifiedPerson.udfValues;
+
+  if (!Array.isArray(udfValues)) {
+    console.log(
+      "UnifiedPerson udfValues is not an array:",
+      udfValues
+    );
+
+    return null;
+  }
+
+  for (const udf of udfValues) {
+    if (!udf || typeof udf !== "object") {
+      continue;
+    }
+
+    const metaId =
+      normalizeMetaId(
+        udf.meta ||
+        udf.key ||
+        udf.metaId ||
+        udf.udfMeta
+      );
+
+    if (metaId !== PERSON_CONTRACTOR_UDF_META_ID) {
+      continue;
+    }
+
+    const value =
+      udf.value ??
+      udf.stringValue ??
+      udf.textValue ??
+      udf.displayValue ??
+      null;
+
+    if (
+      typeof value === "string" &&
+      value.trim()
+    ) {
+      return normalizeContractorCode(value);
+    }
+  }
+
+  return null;
+}
+
 function normalizeOrgLevel(orgLevel) {
-  if (!orgLevel) return null;
+  if (!orgLevel) {
+    return null;
+  }
 
   if (typeof orgLevel === "string") {
     return orgLevel;
@@ -490,7 +571,9 @@ function normalizeOrgLevel(orgLevel) {
 function extractOrgLevel(personWrapper) {
   const person = unwrapPerson(personWrapper);
 
-  if (!person) return null;
+  if (!person) {
+    return null;
+  }
 
   const rawOrgLevel =
     person.orgLevelIds?.[0] ||
@@ -500,183 +583,84 @@ function extractOrgLevel(personWrapper) {
     person.organizationLevel ||
     person.organizationLevelId ||
     person.organizationLevelIds?.[0] ||
-    person.organizationalLevel ||
-    person.organization;
+    null;
 
   return normalizeOrgLevel(rawOrgLevel);
 }
 
-/*
- * Pokušava da pročita custom PersonContractor vrednost.
- *
- * Proverava:
- * - direktna polja na Person DTO-u
- * - udfValues kao niz
- * - udfValues kao objekat
- *
- * Kada dobijemo tačan Person response, možemo ovu funkciju
- * dodatno precizirati.
- */
-function extractPersonContractor(personWrapper) {
-  const person = unwrapPerson(personWrapper);
-
-  if (!person) return null;
-
-  const directValue =
-    person.personContractor ||
-    person.PersonContractor ||
-    person.contractor ||
-    person.contractorCode ||
-    person.contractorName ||
-    null;
-
-  if (typeof directValue === "string" && directValue.trim()) {
-    return normalizeContractorCode(directValue);
-  }
-
-  const udfValues = person.udfValues;
-
-  if (Array.isArray(udfValues)) {
-    for (const udf of udfValues) {
-      if (!udf || typeof udf !== "object") {
-        continue;
-      }
-
-      const fieldName = String(
-        udf.name ||
-        udf.key ||
-        udf.code ||
-        udf.meta ||
-        udf.metaName ||
-        udf.fieldName ||
-        udf.udfName ||
-        ""
-      ).toLowerCase();
-
-      if (
-        fieldName === "personcontractor" ||
-        fieldName === "person_contractor" ||
-        fieldName === "contractor"
-      ) {
-        const value =
-          udf.value ||
-          udf.stringValue ||
-          udf.textValue ||
-          udf.displayValue ||
-          null;
-
-        if (typeof value === "string" && value.trim()) {
-          return normalizeContractorCode(value);
-        }
-      }
-    }
-  }
-
-  if (udfValues && typeof udfValues === "object" && !Array.isArray(udfValues)) {
-    const possibleValue =
-      udfValues.PersonContractor ||
-      udfValues.personContractor ||
-      udfValues.person_contractor ||
-      udfValues.contractor ||
-      null;
-
-    if (
-      typeof possibleValue === "string" &&
-      possibleValue.trim()
-    ) {
-      return normalizeContractorCode(possibleValue);
-    }
-  }
-
-  return null;
-}
-
-function normalizeContractorCode(value) {
-  const normalized = String(value)
-    .trim()
-    .toUpperCase()
-    .replace(/\s+/g, "_")
-    .replace(/-/g, "_");
-
-  const aliases = {
-    "SATPRAXIS": "SAT_PRAXIS",
-    "SAT_PRAXIS": "SAT_PRAXIS",
-    "SAT_PRAXIS_DOO": "SAT_PRAXIS",
-    "ICOM": "ICOM",
-    "ICOM_DOO": "ICOM"
-  };
-
-  return aliases[normalized] || normalized;
-}
-
 function extractDurationFromServiceCall(serviceCall) {
-  if (!serviceCall) return null;
+  if (!serviceCall) {
+    return null;
+  }
 
-  return (
+  const value =
     serviceCall.durationInMinutes ||
     serviceCall.durationMinutes ||
-    serviceCall.duration ||
     serviceCall.plannedDurationInMinutes ||
-    null
-  );
+    serviceCall.duration ||
+    null;
+
+  const numericValue = Number(value);
+
+  if (
+    !Number.isFinite(numericValue) ||
+    numericValue <= 0
+  ) {
+    return null;
+  }
+
+  return numericValue;
 }
 
 function extractLocationFromServiceCall(serviceCall) {
-  if (!serviceCall) return null;
+  if (!serviceCall) {
+    return null;
+  }
 
   const address = serviceCall.address || {};
 
   const latitude =
-    serviceCall.latitude ||
-    serviceCall.lat ||
-    serviceCall.location?.latitude ||
-    serviceCall.location?.lat ||
-    address.latitude ||
-    address.lat ||
-    address.location?.latitude ||
-    address.location?.lat ||
-    address.geoLatitude ||
+    serviceCall.latitude ??
+    serviceCall.lat ??
+    serviceCall.location?.latitude ??
+    serviceCall.location?.lat ??
+    address.latitude ??
+    address.lat ??
+    address.location?.latitude ??
+    address.location?.lat ??
+    address.geoLatitude ??
     null;
 
   const longitude =
-    serviceCall.longitude ||
-    serviceCall.lng ||
-    serviceCall.lon ||
-    serviceCall.location?.longitude ||
-    serviceCall.location?.lng ||
-    serviceCall.location?.lon ||
-    address.longitude ||
-    address.lng ||
-    address.lon ||
-    address.location?.longitude ||
-    address.location?.lng ||
-    address.location?.lon ||
-    address.geoLongitude ||
+    serviceCall.longitude ??
+    serviceCall.lng ??
+    serviceCall.lon ??
+    serviceCall.location?.longitude ??
+    serviceCall.location?.lng ??
+    serviceCall.location?.lon ??
+    address.longitude ??
+    address.lng ??
+    address.lon ??
+    address.location?.longitude ??
+    address.location?.lng ??
+    address.location?.lon ??
+    address.geoLongitude ??
     null;
 
+  const numericLatitude = Number(latitude);
+  const numericLongitude = Number(longitude);
+
   if (
-    latitude === null ||
-    latitude === undefined ||
-    longitude === null ||
-    longitude === undefined
+    !Number.isFinite(numericLatitude) ||
+    !Number.isFinite(numericLongitude)
   ) {
     return null;
   }
 
   return {
-    latitude: Number(latitude),
-    longitude: Number(longitude)
+    latitude: numericLatitude,
+    longitude: numericLongitude
   };
-}
-
-function addStringIfValid(values, value) {
-  if (typeof value !== "string") return;
-
-  const cleaned = value.trim();
-
-  if (!cleaned) return;
-
-  values.push(cleaned);
 }
 
 function extractRequirementTagIds(requirementResponse) {
@@ -689,13 +673,22 @@ function extractRequirementTagIds(requirementResponse) {
   for (const row of rows) {
     const requirement = unwrapRequirement(row);
 
-    if (!requirement) continue;
+    if (!requirement) {
+      continue;
+    }
+
+    if (requirement.inactive === true) {
+      continue;
+    }
 
     if (requirement.mandatory === false) {
       continue;
     }
 
-    addStringIfValid(tagIds, requirement.tag);
+    addStringIfValid(
+      tagIds,
+      requirement.tag
+    );
   }
 
   return [...new Set(tagIds)];
@@ -711,16 +704,40 @@ function extractSkillsFromTagResponse(
   const skills = [];
 
   if (tag) {
-    addStringIfValid(skills, tag.externalId);
-    addStringIfValid(skills, tag.name);
+    /*
+     * externalId ima prioritet za integraciju.
+     */
+    addStringIfValid(
+      skills,
+      tag.externalId
+    );
 
+    /*
+     * Ako externalId nije popunjen, koristi name.
+     */
     if (skills.length === 0) {
-      addStringIfValid(skills, tag.id);
+      addStringIfValid(
+        skills,
+        tag.name
+      );
+    }
+
+    /*
+     * Poslednji fallback je interni Tag ID.
+     */
+    if (skills.length === 0) {
+      addStringIfValid(
+        skills,
+        tag.id
+      );
     }
   }
 
   if (skills.length === 0) {
-    addStringIfValid(skills, fallbackTagId);
+    addStringIfValid(
+      skills,
+      fallbackTagId
+    );
   }
 
   return [...new Set(skills)];
@@ -730,17 +747,19 @@ async function resolveRequirementSkills(
   requirementResponse,
   token
 ) {
-  const tagIds = extractRequirementTagIds(
-    requirementResponse
-  );
+  const tagIds =
+    extractRequirementTagIds(
+      requirementResponse
+    );
 
   console.log("Requirement Tag IDs:", tagIds);
 
-  const resolvedSkills = [];
+  const mandatorySkills = [];
   const tagLookups = [];
 
   for (const tagId of tagIds) {
-    const tagLookup = await getTag(tagId, token);
+    const tagLookup =
+      await getTag(tagId, token);
 
     const skillsFromTag =
       extractSkillsFromTagResponse(
@@ -755,27 +774,149 @@ async function resolveRequirementSkills(
       skillsFromTag
     });
 
-    resolvedSkills.push(...skillsFromTag);
+    mandatorySkills.push(
+      ...skillsFromTag
+    );
   }
 
   return {
-    mandatorySkills: [...new Set(resolvedSkills)],
+    mandatorySkills: [
+      ...new Set(mandatorySkills)
+    ],
     tagIds,
     tagLookups
   };
 }
 
+function buildSkillMatrixKey(skills) {
+  return [
+    ...new Set(
+      skills
+        .map((skill) => String(skill).trim())
+        .filter(Boolean)
+    )
+  ]
+    .sort()
+    .join("|");
+}
+
+function generateRollingSlots() {
+  const timezone = "Europe/Athens";
+  const daysAhead = 7;
+
+  const workingDayStartHour = 8;
+  const workingDayEndHour = 18;
+
+  const startBufferMinutes = 5;
+  const slotDurationMinutes = 30;
+
+  const now = DateTime.now()
+    .setZone(timezone)
+    .plus({
+      minutes: startBufferMinutes
+    });
+
+  const slots = [];
+
+  for (
+    let dayOffset = 0;
+    dayOffset < daysAhead;
+    dayOffset++
+  ) {
+    const day = now.plus({
+      days: dayOffset
+    });
+
+    let dayStart = day.set({
+      hour: workingDayStartHour,
+      minute: 0,
+      second: 0,
+      millisecond: 0
+    });
+
+    const dayEnd = day.set({
+      hour: workingDayEndHour,
+      minute: 0,
+      second: 0,
+      millisecond: 0
+    });
+
+    if (
+      dayOffset === 0 &&
+      now > dayStart
+    ) {
+      dayStart = now;
+    }
+
+    const remainder =
+      dayStart.minute %
+      slotDurationMinutes;
+
+    if (
+      remainder !== 0 ||
+      dayStart.second !== 0 ||
+      dayStart.millisecond !== 0
+    ) {
+      const minutesToAdd =
+        remainder === 0
+          ? slotDurationMinutes
+          : slotDurationMinutes - remainder;
+
+      dayStart = dayStart
+        .plus({
+          minutes: minutesToAdd
+        })
+        .set({
+          second: 0,
+          millisecond: 0
+        });
+    } else {
+      dayStart = dayStart.set({
+        second: 0,
+        millisecond: 0
+      });
+    }
+
+    let slotStart = dayStart;
+
+    while (
+      slotStart.plus({
+        minutes: slotDurationMinutes
+      }) <= dayEnd
+    ) {
+      const slotEnd =
+        slotStart.plus({
+          minutes: slotDurationMinutes
+        });
+
+      slots.push({
+        start: slotStart
+          .toUTC()
+          .toISO(),
+        end: slotEnd
+          .toUTC()
+          .toISO()
+      });
+
+      slotStart = slotEnd;
+    }
+  }
+
+  return slots;
+}
+
 function buildOptimizationPayload(
-  reqBody,
+  requestBody,
   serviceCall,
   mandatorySkills
 ) {
-  const fallbackJob = reqBody.job || {};
+  const fallbackJob =
+    requestBody.job || {};
 
   const durationMinutes =
     extractDurationFromServiceCall(serviceCall) ||
-    fallbackJob.durationMinutes ||
-    fallbackJob.durationInMinutes ||
+    Number(fallbackJob.durationMinutes) ||
+    Number(fallbackJob.durationInMinutes) ||
     60;
 
   const location =
@@ -792,59 +933,64 @@ function buildOptimizationPayload(
       location,
       mandatorySkills
     },
-    resources: reqBody.resources || {
-      filters: {
-        includeInternalPersons: true,
-        includeCrowdPersons: false,
-        includeMandatorySkills:
-          mandatorySkills.length > 0
-      }
-    },
+
+    resources:
+      requestBody.resources || {
+        filters: {
+          includeInternalPersons: true,
+          includeCrowdPersons: false,
+          includeMandatorySkills:
+            mandatorySkills.length > 0
+        }
+      },
+
     slots: generateRollingSlots(),
-    options: reqBody.options || {
-      /*
-       * Treba da vratimo više resursa da bismo mogli
-       * da proverimo različite contractore.
-       */
-      maxResultsPerSlot: 10,
-      defaultDrivingTimeMinutes: 30
-    },
+
+    options:
+      requestBody.options || {
+        /*
+         * Treba više rezultata po slotu,
+         * kako bismo dobili resurse iz više contractor-a.
+         */
+        maxResultsPerSlot: 10,
+        defaultDrivingTimeMinutes: 30
+      },
+
     policy:
-      reqBody.policy ||
+      requestBody.policy ||
       "DistanceAndSkills"
   };
 }
 
 function isResultInsideSlot(result) {
   if (
-    !result ||
-    !result.start ||
-    !result.end ||
-    !result.slot?.start ||
-    !result.slot?.end
+    !result?.start ||
+    !result?.end ||
+    !result?.slot?.start ||
+    !result?.slot?.end
   ) {
     return false;
   }
 
-  const resultStart = DateTime.fromISO(
-    result.start,
-    { setZone: true }
-  );
+  const resultStart =
+    DateTime.fromISO(result.start, {
+      setZone: true
+    });
 
-  const resultEnd = DateTime.fromISO(
-    result.end,
-    { setZone: true }
-  );
+  const resultEnd =
+    DateTime.fromISO(result.end, {
+      setZone: true
+    });
 
-  const slotStart = DateTime.fromISO(
-    result.slot.start,
-    { setZone: true }
-  );
+  const slotStart =
+    DateTime.fromISO(result.slot.start, {
+      setZone: true
+    });
 
-  const slotEnd = DateTime.fromISO(
-    result.slot.end,
-    { setZone: true }
-  );
+  const slotEnd =
+    DateTime.fromISO(result.slot.end, {
+      setZone: true
+    });
 
   if (
     !resultStart.isValid ||
@@ -856,8 +1002,10 @@ function isResultInsideSlot(result) {
   }
 
   return (
-    resultStart.toMillis() >= slotStart.toMillis() &&
-    resultEnd.toMillis() <= slotEnd.toMillis()
+    resultStart.toMillis() >=
+      slotStart.toMillis() &&
+    resultEnd.toMillis() <=
+      slotEnd.toMillis()
   );
 }
 
@@ -872,34 +1020,215 @@ function normalizeOptimizationResult(result) {
   };
 }
 
+async function enrichOptimizationResultsWithPersonData(
+  validResults,
+  token
+) {
+  const uniqueResourceIds = [
+    ...new Set(
+      validResults.map(
+        (result) => result.resource
+      )
+    )
+  ];
+
+  console.log(
+    "Unique resources returned by Optimization:",
+    uniqueResourceIds
+  );
+
+  const personDataCache = new Map();
+
+  for (const resourceId of uniqueResourceIds) {
+    try {
+      /*
+       * Person koristimo za orgLevel.
+       */
+      const personResponse =
+        await getPerson(
+          resourceId,
+          token
+        );
+
+      const personWrapper =
+        getFirstItem(personResponse);
+
+      const orgLevel =
+        extractOrgLevel(
+          personWrapper
+        );
+
+      /*
+       * UnifiedPerson koristimo za PersonContractor UDF.
+       */
+      const unifiedPersonResponse =
+        await getUnifiedPerson(
+          resourceId,
+          token
+        );
+
+      console.log(
+        "UnifiedPerson response for contractor lookup:",
+        JSON.stringify(
+          unifiedPersonResponse,
+          null,
+          2
+        )
+      );
+
+      const unifiedPersonWrapper =
+        getFirstItem(
+          unifiedPersonResponse
+        );
+
+      const contractor =
+        extractPersonContractor(
+          unifiedPersonWrapper
+        );
+
+      personDataCache.set(
+        resourceId,
+        {
+          orgLevel,
+          contractor
+        }
+      );
+
+      console.log(
+        "Resource contractor mapping:",
+        {
+          resourceId,
+          contractor,
+          orgLevel
+        }
+      );
+    } catch (error) {
+      console.error(
+        "Failed to load Person/UnifiedPerson for resource:",
+        resourceId,
+        error.response?.data ||
+          error.message
+      );
+
+      personDataCache.set(
+        resourceId,
+        {
+          orgLevel: null,
+          contractor: null
+        }
+      );
+    }
+  }
+
+  return validResults.map((result) => {
+    const personData =
+      personDataCache.get(
+        result.resource
+      ) || {};
+
+    return {
+      ...result,
+      orgLevel:
+        personData.orgLevel ||
+        null,
+      contractor:
+        personData.contractor ||
+        null
+    };
+  });
+}
+
+function groupResultsByContractor(enrichedResults) {
+  const grouped = {};
+
+  for (const result of enrichedResults) {
+    if (
+      !result.contractor ||
+      !result.orgLevel
+    ) {
+      continue;
+    }
+
+    if (!grouped[result.contractor]) {
+      grouped[result.contractor] = [];
+    }
+
+    grouped[result.contractor].push(
+      result
+    );
+  }
+
+  for (const contractor of Object.keys(grouped)) {
+    grouped[contractor].sort(
+      (first, second) => {
+        const firstScore =
+          Number(first.score) || 0;
+
+        const secondScore =
+          Number(second.score) || 0;
+
+        /*
+         * Veći score ima prioritet.
+         */
+        if (
+          secondScore !== firstScore
+        ) {
+          return (
+            secondScore -
+            firstScore
+          );
+        }
+
+        /*
+         * Kod istog score-a uzimamo raniji termin.
+         */
+        return (
+          new Date(first.start).getTime() -
+          new Date(second.start).getTime()
+        );
+      }
+    );
+  }
+
+  return grouped;
+}
+
 function selectContractorBySequence(
   matrixKey,
   availableContractors
 ) {
+  const matrix =
+    CONTRACTOR_ALLOCATION_MATRIX[
+      matrixKey
+    ];
+
   const sequence =
-    CONTRACTOR_ALLOCATION_SEQUENCES[matrixKey];
+    CONTRACTOR_ALLOCATION_SEQUENCES[
+      matrixKey
+    ];
 
-  const weights =
-    CONTRACTOR_ALLOCATION_MATRIX[matrixKey];
-
-  if (!sequence || !weights) {
+  if (!matrix || !sequence) {
     return {
       selectedContractor: null,
       preferredContractor: null,
       fallbackUsed: false,
       reason: "MATRIX_NOT_CONFIGURED",
+      weights: matrix || null,
       counterBefore: null,
       counterAfter: null,
       sequencePosition: null,
-      weights: null
+      sequenceLength:
+        sequence?.length || null
     };
   }
 
   const counterBefore =
-    allocationCounters[matrixKey] || 0;
+    allocationCounters[matrixKey] ||
+    0;
 
   const sequencePosition =
-    counterBefore % sequence.length;
+    counterBefore %
+    sequence.length;
 
   const preferredContractor =
     sequence[sequencePosition];
@@ -916,18 +1245,27 @@ function selectContractorBySequence(
     selectedContractor =
       preferredContractor;
 
-    reason = "QUOTA_SEQUENCE";
-  } else if (availableContractors.length > 0) {
+    reason =
+      "QUOTA_SEQUENCE";
+  } else if (
+    availableContractors.length > 0
+  ) {
+    /*
+     * Ako preferirani contractor trenutno nema
+     * validnog resursa, biramo dostupnog contractor-a
+     * sa najboljim rezultatom.
+     */
     selectedContractor =
       availableContractors[0];
 
     fallbackUsed = true;
+
     reason =
       "QUOTA_FALLBACK_PREFERRED_CONTRACTOR_UNAVAILABLE";
   }
 
   /*
-   * Brojač povećavamo samo ako smo stvarno izabrali contractor-a.
+   * Brojač se povećava samo kada je contractor stvarno izabran.
    */
   if (selectedContractor) {
     allocationCounters[matrixKey] =
@@ -939,205 +1277,135 @@ function selectContractorBySequence(
     preferredContractor,
     fallbackUsed,
     reason,
+    weights: matrix,
     counterBefore,
     counterAfter:
       allocationCounters[matrixKey] ??
       counterBefore,
     sequencePosition,
     sequenceLength:
-      sequence.length,
-    weights
+      sequence.length
   };
 }
 
-async function enrichOptimizationResultsWithPerson(
-  validResults,
-  token
+/*
+ * Sortira dostupne contractore prema njihovom
+ * najboljem Optimization rezultatu.
+ *
+ * Ovo se koristi samo za fallback.
+ */
+function sortAvailableContractors(
+  groupedByContractor
 ) {
-  /*
-   * Optimization često vraća istog resource-a
-   * za više različitih slotova.
-   *
-   * Zato Person dohvatamo samo jednom po resource ID-u.
-   */
-  const uniqueResourceIds = [
-    ...new Set(
-      validResults.map(
-        (result) => result.resource
-      )
-    )
-  ];
+  return Object.keys(
+    groupedByContractor
+  ).sort((first, second) => {
+    const firstBest =
+      groupedByContractor[first]?.[0];
 
-  const personCache = new Map();
+    const secondBest =
+      groupedByContractor[second]?.[0];
 
-  for (const resourceId of uniqueResourceIds) {
-    try {
-      const personResponse =
-        await getPerson(resourceId, token);
+    const firstScore =
+      Number(firstBest?.score) || 0;
 
-      const personWrapper =
-        getFirstItem(personResponse);
+    const secondScore =
+      Number(secondBest?.score) || 0;
 
-      const contractor =
-        extractPersonContractor(
-          personWrapper
-        );
-
-      const orgLevel =
-        extractOrgLevel(
-          personWrapper
-        );
-
-      personCache.set(resourceId, {
-        personWrapper,
-        contractor,
-        orgLevel
-      });
-
-      console.log(
-        "Resource contractor mapping:",
-        {
-          resourceId,
-          contractor,
-          orgLevel
-        }
+    if (
+      secondScore !== firstScore
+    ) {
+      return (
+        secondScore -
+        firstScore
       );
-    } catch (error) {
-      console.error(
-        "Failed to load Person for resource:",
-        resourceId,
-        error.response?.data ||
-          error.message
-      );
-
-      personCache.set(resourceId, {
-        personWrapper: null,
-        contractor: null,
-        orgLevel: null
-      });
     }
-  }
 
-  return validResults.map((result) => {
-    const personData =
-      personCache.get(result.resource) || {};
-
-    return {
-      ...result,
-      contractor:
-        personData.contractor || null,
-      orgLevel:
-        personData.orgLevel || null
-    };
+    return (
+      new Date(
+        firstBest?.start || 0
+      ).getTime() -
+      new Date(
+        secondBest?.start || 0
+      ).getTime()
+    );
   });
 }
 
-function groupResultsByContractor(
-  enrichedResults
-) {
-  const grouped = {};
-
-  for (const result of enrichedResults) {
-    if (!result.contractor) {
-      continue;
-    }
-
-    if (!grouped[result.contractor]) {
-      grouped[result.contractor] = [];
-    }
-
-    grouped[result.contractor].push(result);
-  }
-
-  /*
-   * Sortiramo rezultate svakog contractor-a po:
-   * 1. najvećem score-u
-   * 2. najranijem startu
-   */
-  for (const contractor of Object.keys(grouped)) {
-    grouped[contractor].sort((a, b) => {
-      const scoreA =
-        Number(a.score) || 0;
-
-      const scoreB =
-        Number(b.score) || 0;
-
-      if (scoreB !== scoreA) {
-        return scoreB - scoreA;
-      }
-
-      return (
-        new Date(a.start).getTime() -
-        new Date(b.start).getTime()
-      );
-    });
-  }
-
-  return grouped;
-}
-
-app.get("/health", (req, res) => {
-  res.json({
+app.get("/health", (request, response) => {
+  response.json({
     status: "ok",
     service: "fsm-score-wrapper",
     allocationCounters
   });
 });
 
-/*
- * Test endpoint za reset brojača.
- * Koristi samo tokom testiranja.
- */
-app.post("/allocation/reset", (req, res) => {
-  const matrixKey =
-    req.body?.matrixKey;
-
-  if (matrixKey) {
-    allocationCounters[matrixKey] = 0;
-
-    return res.json({
-      status: "reset",
-      matrixKey,
-      counter: 0
+app.get(
+  "/allocation/status",
+  (request, response) => {
+    response.json({
+      matrix:
+        CONTRACTOR_ALLOCATION_MATRIX,
+      sequences:
+        CONTRACTOR_ALLOCATION_SEQUENCES,
+      counters:
+        allocationCounters
     });
   }
+);
 
-  for (const key of Object.keys(allocationCounters)) {
-    delete allocationCounters[key];
+app.post(
+  "/allocation/reset",
+  (request, response) => {
+    const matrixKey =
+      request.body?.matrixKey;
+
+    if (matrixKey) {
+      allocationCounters[matrixKey] = 0;
+
+      return response.json({
+        status: "reset",
+        matrixKey,
+        counter: 0
+      });
+    }
+
+    for (
+      const key of
+      Object.keys(allocationCounters)
+    ) {
+      delete allocationCounters[key];
+    }
+
+    return response.json({
+      status: "all counters reset",
+      counters: allocationCounters
+    });
   }
-
-  return res.json({
-    status: "all counters reset",
-    allocationCounters
-  });
-});
-
-app.get("/allocation/status", (req, res) => {
-  res.json({
-    matrix:
-      CONTRACTOR_ALLOCATION_MATRIX,
-    sequences:
-      CONTRACTOR_ALLOCATION_SEQUENCES,
-    counters:
-      allocationCounters
-  });
-});
+);
 
 app.post(
   "/score-with-org-level",
-  async (req, res) => {
+  async (request, response) => {
     try {
-      console.log("Received request from FSM.");
+      console.log(
+        "Received request from FSM."
+      );
+
       console.log(
         "Incoming body:",
-        JSON.stringify(req.body, null, 2)
+        JSON.stringify(
+          request.body,
+          null,
+          2
+        )
       );
 
       const serviceCallId =
-        req.body.serviceCallId;
+        request.body?.serviceCallId;
 
       if (!serviceCallId) {
-        return res.status(400).json({
+        return response.status(400).json({
           error:
             "serviceCallId is required"
         });
@@ -1163,7 +1431,7 @@ app.post(
         );
 
       if (!serviceCall) {
-        return res.status(400).json({
+        return response.status(400).json({
           error:
             "ServiceCall not found",
           serviceCallId
@@ -1186,8 +1454,10 @@ app.post(
         resolvedRequirementSkills
           .mandatorySkills;
 
-      if (mandatorySkills.length === 0) {
-        return res.status(400).json({
+      if (
+        mandatorySkills.length === 0
+      ) {
+        return response.status(400).json({
           error:
             "No mandatory skills resolved from Requirement and Tag DTO",
           serviceCallId,
@@ -1210,21 +1480,65 @@ app.post(
         matrixKey
       );
 
+      if (
+        !CONTRACTOR_ALLOCATION_MATRIX[
+          matrixKey
+        ]
+      ) {
+        return response.status(400).json({
+          error:
+            "Contractor allocation matrix is not configured for this skill combination",
+          matrixKey,
+          mandatorySkills
+        });
+      }
+
       const optimizationPayload =
         buildOptimizationPayload(
-          req.body,
+          request.body,
           serviceCall,
           mandatorySkills
         );
 
       console.log(
         "Generated slots count:",
-        optimizationPayload.slots.length
+        optimizationPayload
+          .slots.length
       );
 
       console.log(
         "Mandatory skills used:",
         mandatorySkills
+      );
+
+      console.log(
+        "Optimization request summary:",
+        JSON.stringify(
+          {
+            job:
+              optimizationPayload.job,
+            resources:
+              optimizationPayload.resources,
+            options:
+              optimizationPayload.options,
+            policy:
+              optimizationPayload.policy,
+            slotsCount:
+              optimizationPayload
+                .slots.length,
+            firstSlot:
+              optimizationPayload
+                .slots[0] || null,
+            lastSlot:
+              optimizationPayload
+                .slots[
+                  optimizationPayload
+                    .slots.length - 1
+                ] || null
+          },
+          null,
+          2
+        )
       );
 
       const scoreResponse =
@@ -1241,7 +1555,9 @@ app.post(
         scoreResponse.data;
 
       const allResults =
-        Array.isArray(scoreData.results)
+        Array.isArray(
+          scoreData.results
+        )
           ? scoreData.results.filter(
               (item) =>
                 item &&
@@ -1256,64 +1572,85 @@ app.post(
           isResultInsideSlot
         );
 
-      if (validResults.length === 0) {
-        return res.status(400).json({
+      const rejectedResults =
+        allResults.filter(
+          (item) =>
+            !isResultInsideSlot(item)
+        );
+
+      console.log(
+        "Optimization result counts:",
+        {
+          total:
+            allResults.length,
+          valid:
+            validResults.length,
+          rejectedOutsideSlot:
+            rejectedResults.length
+        }
+      );
+
+      if (
+        validResults.length === 0
+      ) {
+        return response.status(400).json({
           error:
             "No valid optimization results completely inside their slots",
           matrixKey,
           mandatorySkillsUsed:
             mandatorySkills,
           generatedSlotsCount:
-            optimizationPayload.slots.length,
+            optimizationPayload
+              .slots.length,
           scoreData
         });
       }
 
       const enrichedResults =
-        await enrichOptimizationResultsWithPerson(
+        await enrichOptimizationResultsWithPersonData(
           validResults,
           token
         );
 
-      const resultsWithContractor =
-        enrichedResults.filter(
-          (result) =>
-            result.contractor &&
-            result.orgLevel
-        );
+      const resourcesWithoutContractor =
+        [
+          ...new Map(
+            enrichedResults
+              .filter(
+                (result) =>
+                  !result.contractor
+              )
+              .map((result) => [
+                result.resource,
+                {
+                  resource:
+                    result.resource,
+                  contractor:
+                    result.contractor,
+                  orgLevel:
+                    result.orgLevel
+                }
+              ])
+          ).values()
+        ];
 
       if (
-        resultsWithContractor.length === 0
+        resourcesWithoutContractor.length >
+        0
       ) {
-        return res.status(400).json({
-          error:
-            "Optimization returned resources, but PersonContractor or orgLevel was not found",
-          matrixKey,
-          mandatorySkillsUsed:
-            mandatorySkills,
-          resources:
-            enrichedResults.map(
-              (result) => ({
-                resource:
-                  result.resource,
-                contractor:
-                  result.contractor,
-                orgLevel:
-                  result.orgLevel
-              })
-            ),
-          hint:
-            "Check Person DTO response and the exact PersonContractor field/UDF path."
-        });
+        console.log(
+          "Resources without PersonContractor:",
+          resourcesWithoutContractor
+        );
       }
 
       const groupedByContractor =
         groupResultsByContractor(
-          resultsWithContractor
+          enrichedResults
         );
 
       const availableContractors =
-        Object.keys(
+        sortAvailableContractors(
           groupedByContractor
         );
 
@@ -1322,23 +1659,51 @@ app.post(
         availableContractors
       );
 
+      if (
+        availableContractors.length === 0
+      ) {
+        return response.status(400).json({
+          error:
+            "Optimization returned resources, but no resource has both PersonContractor and orgLevel",
+          matrixKey,
+          mandatorySkillsUsed:
+            mandatorySkills,
+          resources:
+            [
+              ...new Map(
+                enrichedResults.map(
+                  (result) => [
+                    result.resource,
+                    {
+                      resource:
+                        result.resource,
+                      contractor:
+                        result.contractor,
+                      orgLevel:
+                        result.orgLevel
+                    }
+                  ]
+                )
+              ).values()
+            ],
+          hint:
+            "PersonContractor must exist on UnifiedPerson.13 in the configured UDF meta ID."
+        });
+      }
+
       const allocation =
         selectContractorBySequence(
           matrixKey,
           availableContractors
         );
 
-      /*
-       * Ako nema matrice za kombinaciju skillova,
-       * za sada vraćamo grešku.
-       */
       if (
         allocation.reason ===
         "MATRIX_NOT_CONFIGURED"
       ) {
-        return res.status(400).json({
+        return response.status(400).json({
           error:
-            "Contractor allocation matrix is not configured for this skill combination",
+            "Contractor allocation sequence is not configured",
           matrixKey,
           mandatorySkillsUsed:
             mandatorySkills,
@@ -1349,7 +1714,7 @@ app.post(
       if (
         !allocation.selectedContractor
       ) {
-        return res.status(400).json({
+        return response.status(400).json({
           error:
             "No contractor could be selected",
           matrixKey,
@@ -1369,13 +1734,12 @@ app.post(
         selectedContractorResults[0];
 
       if (!bestResult) {
-        return res.status(400).json({
+        return response.status(400).json({
           error:
-            "Selected contractor has no optimization result",
-          matrixKey,
+            "Selected contractor has no valid optimization result",
           selectedContractor:
             allocation.selectedContractor,
-          availableContractors,
+          matrixKey,
           allocation
         });
       }
@@ -1434,19 +1798,28 @@ app.post(
         },
 
         generatedSlotsCount:
-          optimizationPayload.slots.length,
+          optimizationPayload
+            .slots.length,
 
         mandatorySkillsUsed:
           mandatorySkills,
 
         requirementQueryUsed:
-          requirementLookup.queryUsed,
+          requirementLookup
+            .queryUsed,
 
         requirementTagIds:
-          resolvedRequirementSkills.tagIds,
+          resolvedRequirementSkills
+            .tagIds,
+
+        totalOptimizationResults:
+          allResults.length,
 
         validResultsCount:
-          validResults.length
+          validResults.length,
+
+        rejectedOutsideSlotCount:
+          rejectedResults.length
       };
 
       console.log(
@@ -1458,7 +1831,7 @@ app.post(
         )
       );
 
-      return res.json(
+      return response.json(
         enrichedResponse
       );
     } catch (error) {
@@ -1483,7 +1856,7 @@ app.post(
         );
       }
 
-      return res.status(500).json({
+      return response.status(500).json({
         error:
           "Wrapper endpoint failed",
         message:
@@ -1500,23 +1873,21 @@ const host =
   process.env.HOST ||
   "0.0.0.0";
 
-const port =
-  Number(PORT);
+const port = Number(PORT);
 
-const server =
-  app.listen(
-    port,
-    host,
-    () => {
-      console.log(
-        `FSM score wrapper running on ${host}:${port}`
-      );
+const server = app.listen(
+  port,
+  host,
+  () => {
+    console.log(
+      `FSM score wrapper running on ${host}:${port}`
+    );
 
-      console.log(
-        "Health check: /health"
-      );
-    }
-  );
+    console.log(
+      "Health check: /health"
+    );
+  }
+);
 
 server.on(
   "error",
