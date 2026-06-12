@@ -1063,6 +1063,19 @@ function buildOptimizationPayload(
       longitude: 23.1283
     };
 
+  const requestedOptions =
+    requestBody.options || {};
+
+  const requestedMaxResultsPerSlot =
+    Number(
+      requestedOptions.maxResultsPerSlot
+    );
+
+  const requestedDrivingTimeMinutes =
+    Number(
+      requestedOptions.defaultDrivingTimeMinutes
+    );
+
   return {
     job: {
       durationMinutes,
@@ -1082,14 +1095,27 @@ function buildOptimizationPayload(
 
     slots: generateRollingSlots(),
 
-    options:
-      requestBody.options || {
+    options: {
+      ...requestedOptions,
         /*
          * Treba više rezultata po slotu,
          * kako bismo dobili resurse iz više contractor-a.
          */
-        maxResultsPerSlot: 10,
-        defaultDrivingTimeMinutes: 30
+        maxResultsPerSlot:
+          Number.isFinite(
+            requestedMaxResultsPerSlot
+          )
+            ? Math.max(
+                requestedMaxResultsPerSlot,
+                10
+              )
+            : 10,
+        defaultDrivingTimeMinutes:
+          Number.isFinite(
+            requestedDrivingTimeMinutes
+          )
+            ? requestedDrivingTimeMinutes
+            : 30
       },
 
     policy:
@@ -1154,6 +1180,51 @@ function normalizeOptimizationResult(result) {
     trip: result.trip || null,
     score: result.score ?? null
   };
+}
+
+function summarizeResultsByResource(results) {
+  const summary = new Map();
+
+  for (const result of results) {
+    if (!result?.resource) {
+      continue;
+    }
+
+    const current =
+      summary.get(result.resource) || {
+        resource: result.resource,
+        count: 0,
+        bestScore: null,
+        firstStart: null
+      };
+
+    const score = Number(result.score);
+
+    current.count += 1;
+    current.bestScore =
+      Number.isFinite(score)
+        ? Math.max(
+            current.bestScore ?? score,
+            score
+          )
+        : current.bestScore;
+    current.firstStart =
+      !current.firstStart ||
+      new Date(result.start).getTime() <
+        new Date(current.firstStart).getTime()
+        ? result.start
+        : current.firstStart;
+
+    summary.set(
+      result.resource,
+      current
+    );
+  }
+
+  return [...summary.values()].sort(
+    (first, second) =>
+      second.count - first.count
+  );
 }
 
 async function enrichOptimizationResultsWithPersonData(
@@ -1714,6 +1785,16 @@ app.post(
             !isResultInsideSlot(item)
         );
 
+      const allResourceDistribution =
+        summarizeResultsByResource(
+          allResults
+        );
+
+      const validResourceDistribution =
+        summarizeResultsByResource(
+          validResults
+        );
+
       console.log(
         "Optimization result counts:",
         {
@@ -1723,6 +1804,16 @@ app.post(
             validResults.length,
           rejectedOutsideSlot:
             rejectedResults.length
+        }
+      );
+
+      console.log(
+        "Optimization resource distribution:",
+        {
+          all:
+            allResourceDistribution,
+          valid:
+            validResourceDistribution
         }
       );
 
@@ -1738,6 +1829,8 @@ app.post(
           generatedSlotsCount:
             optimizationPayload
               .slots.length,
+          allResourceDistribution,
+          validResourceDistribution,
           scoreData
         });
       }
@@ -1955,7 +2048,11 @@ app.post(
           validResults.length,
 
         rejectedOutsideSlotCount:
-          rejectedResults.length
+          rejectedResults.length,
+
+        allResourceDistribution,
+
+        validResourceDistribution
       };
 
       console.log(
