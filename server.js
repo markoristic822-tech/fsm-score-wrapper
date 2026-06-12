@@ -952,32 +952,22 @@ app.post(
           .map(normalizeOptimizationResult);
 
       const enrichedResponse = {
-        results: [
-          {
-            ...normalizeOptimizationResult(
-              bestResult
-            ),
-            orgLevel,
-            requiredSkills:
-              optimizationPayload.job
-                .mandatorySkills
-          }
-        ],
-        alternatives,
-        generatedSlotsCount:
-          optimizationPayload.slots.length,
-        mandatorySkillsUsed:
-          optimizationPayload.job
-            .mandatorySkills,
-        requirementQueryUsed:
-          requirementLookup.queryUsed,
-        requirementTagIds:
-          resolvedRequirementSkills.tagIds,
-        validResultsCount:
-          validResults.length,
-        rejectedOutsideSlotCount:
-          rejectedResults.length
-      };
+  results: [
+    {
+      ...normalizeOptimizationResult(bestResult),
+      orgLevel,
+      requiredSkills: optimizationPayload.job.mandatorySkills,
+      address: serviceCall.address || null
+    }
+  ],
+  alternatives,
+  generatedSlotsCount: optimizationPayload.slots.length,
+  mandatorySkillsUsed: optimizationPayload.job.mandatorySkills,
+  requirementQueryUsed: requirementLookup.queryUsed,
+  requirementTagIds: resolvedRequirementSkills.tagIds,
+  validResultsCount: validResults.length,
+  rejectedOutsideSlotCount: rejectedResults.length
+};
 
       console.log(
         "Returning enriched response:",
