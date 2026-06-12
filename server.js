@@ -32,7 +32,8 @@ if (
   !FSM_COMPANY_NAME ||
   !OPTIMIZATION_URL
 ) {
-  console.error("Missing required .env values.");
+  console.error("Missing required environment values.");
+
   console.error({
     FSM_BASE_URL: !!FSM_BASE_URL,
     FSM_CLIENT_ID: !!FSM_CLIENT_ID,
@@ -47,6 +48,7 @@ if (
     FSM_SERVICE_CALL_DTO,
     FSM_TAG_DTO
   });
+
   process.exit(1);
 }
 
@@ -71,59 +73,72 @@ function dataApiUrl(dtoName, dtoVersion, query) {
   );
 }
 
+/**
+ * Pravi slotove od 30 minuta:
+ * 08:00–18:00 po Athens vremenu,
+ * za danas i narednih 6 dana.
+ */
 function generateRollingSlots() {
   const timezone = "Europe/Athens";
   const daysAhead = 7;
-  const workingDayStart = "08:00";
-  const workingDayEnd = "18:00";
+
+  const workingDayStartHour = 8;
+  const workingDayEndHour = 18;
+
   const startBufferMinutes = 5;
   const slotDurationMinutes = 30;
-  const slotStepMinutes = 30;
 
   const now = DateTime.now()
     .setZone(timezone)
     .plus({ minutes: startBufferMinutes });
 
-  const [startHour, startMinute] = workingDayStart.split(":").map(Number);
-  const [endHour, endMinute] = workingDayEnd.split(":").map(Number);
-
   const slots = [];
 
-  for (let i = 0; i < daysAhead; i++) {
-    const day = now.plus({ days: i });
+  for (let dayOffset = 0; dayOffset < daysAhead; dayOffset++) {
+    const day = now.plus({ days: dayOffset });
 
     let dayStart = day.set({
-      hour: startHour,
-      minute: startMinute,
+      hour: workingDayStartHour,
+      minute: 0,
       second: 0,
       millisecond: 0
     });
 
     const dayEnd = day.set({
-      hour: endHour,
-      minute: endMinute,
+      hour: workingDayEndHour,
+      minute: 0,
       second: 0,
       millisecond: 0
     });
 
-    if (i === 0 && now > dayStart) {
+    /*
+     * Za današnji dan počinjemo tek posle trenutnog vremena.
+     */
+    if (dayOffset === 0 && now > dayStart) {
       dayStart = now;
     }
 
-    const minute = dayStart.minute;
+    /*
+     * Zaokruživanje na sledećih punih 30 minuta.
+     *
+     * 10:07 -> 10:30
+     * 10:30 -> 10:30
+     * 10:44 -> 11:00
+     */
+    if (
+      dayStart.second !== 0 ||
+      dayStart.millisecond !== 0 ||
+      dayStart.minute % slotDurationMinutes !== 0
+    ) {
+      const minutesToAdd =
+        slotDurationMinutes - (dayStart.minute % slotDurationMinutes);
 
-    if (minute > 0 && minute <= 30) {
-      dayStart = dayStart.set({
-        minute: 30,
-        second: 0,
-        millisecond: 0
-      });
-    } else if (minute > 30) {
-      dayStart = dayStart.plus({ hours: 1 }).set({
-        minute: 0,
-        second: 0,
-        millisecond: 0
-      });
+      dayStart = dayStart
+        .plus({ minutes: minutesToAdd })
+        .set({
+          second: 0,
+          millisecond: 0
+        });
     } else {
       dayStart = dayStart.set({
         second: 0,
@@ -134,14 +149,16 @@ function generateRollingSlots() {
     let slotStart = dayStart;
 
     while (slotStart.plus({ minutes: slotDurationMinutes }) <= dayEnd) {
-      const slotEnd = slotStart.plus({ minutes: slotDurationMinutes });
+      const slotEnd = slotStart.plus({
+        minutes: slotDurationMinutes
+      });
 
       slots.push({
         start: slotStart.toUTC().toISO(),
         end: slotEnd.toUTC().toISO()
       });
 
-      slotStart = slotStart.plus({ minutes: slotStepMinutes });
+      slotStart = slotEnd;
     }
   }
 
@@ -225,12 +242,17 @@ async function getTag(tagId, token) {
       const rows = Array.isArray(data?.data) ? data.data : [];
 
       console.log("Tag query result count:", rows.length);
-      console.log("Tag response:", JSON.stringify(data, null, 2));
 
       if (rows.length > 0) {
+        console.log(
+          "Tag response:",
+          JSON.stringify(data, null, 2)
+        );
+
         return {
           response: data,
-          queryUsed: query
+          queryUsed: query,
+          errors
         };
       }
     } catch (error) {
@@ -262,7 +284,10 @@ async function getTag(tagId, token) {
 }
 
 async function getRequirementsForServiceCall(serviceCallId, token) {
-  console.log("Getting Requirements for ServiceCall:", serviceCallId);
+  console.log(
+    "Getting Requirements for ServiceCall:",
+    serviceCallId
+  );
 
   const queriesToTry = [
     `object.objectId="${serviceCallId}"`,
@@ -274,7 +299,11 @@ async function getRequirementsForServiceCall(serviceCallId, token) {
   const emptyResponses = [];
 
   for (const query of queriesToTry) {
-    const url = dataApiUrl("Requirement", FSM_REQUIREMENT_DTO, query);
+    const url = dataApiUrl(
+      "Requirement",
+      FSM_REQUIREMENT_DTO,
+      query
+    );
 
     try {
       console.log("Trying Requirement query:", query);
@@ -286,13 +315,22 @@ async function getRequirementsForServiceCall(serviceCallId, token) {
       const data = response.data;
       const rows = Array.isArray(data?.data) ? data.data : [];
 
-      console.log("Requirement query result count:", rows.length);
-      console.log("Requirement response:", JSON.stringify(data, null, 2));
+      console.log(
+        "Requirement query result count:",
+        rows.length
+      );
 
       if (rows.length > 0) {
+        console.log(
+          "Requirement response:",
+          JSON.stringify(data, null, 2)
+        );
+
         return {
           response: data,
-          queryUsed: query
+          queryUsed: query,
+          errors,
+          emptyResponses
         };
       }
 
@@ -335,48 +373,49 @@ function getFirstItem(response) {
   if (Array.isArray(response?.items)) return response.items[0];
   if (Array.isArray(response?.values)) return response.values[0];
   if (Array.isArray(response?.records)) return response.records[0];
+
   return null;
 }
 
-function unwrapServiceCall(serviceCallWrapper) {
-  if (!serviceCallWrapper) return null;
+function unwrapServiceCall(wrapper) {
+  if (!wrapper) return null;
 
   return (
-    serviceCallWrapper.serviceCall ||
-    serviceCallWrapper.ServiceCall ||
-    serviceCallWrapper
+    wrapper.serviceCall ||
+    wrapper.ServiceCall ||
+    wrapper
   );
 }
 
-function unwrapPerson(personWrapper) {
-  if (!personWrapper) return null;
+function unwrapPerson(wrapper) {
+  if (!wrapper) return null;
 
   return (
-    personWrapper.person ||
-    personWrapper.Person ||
-    personWrapper.unifiedPerson ||
-    personWrapper.UnifiedPerson ||
-    personWrapper
+    wrapper.person ||
+    wrapper.Person ||
+    wrapper.unifiedPerson ||
+    wrapper.UnifiedPerson ||
+    wrapper
   );
 }
 
-function unwrapRequirement(requirementWrapper) {
-  if (!requirementWrapper) return null;
+function unwrapRequirement(wrapper) {
+  if (!wrapper) return null;
 
   return (
-    requirementWrapper.requirement ||
-    requirementWrapper.Requirement ||
-    requirementWrapper
+    wrapper.requirement ||
+    wrapper.Requirement ||
+    wrapper
   );
 }
 
-function unwrapTag(tagWrapper) {
-  if (!tagWrapper) return null;
+function unwrapTag(wrapper) {
+  if (!wrapper) return null;
 
   return (
-    tagWrapper.tag ||
-    tagWrapper.Tag ||
-    tagWrapper
+    wrapper.tag ||
+    wrapper.Tag ||
+    wrapper
   );
 }
 
@@ -388,7 +427,12 @@ function normalizeOrgLevel(orgLevel) {
   }
 
   if (typeof orgLevel === "object") {
-    return orgLevel.id || orgLevel.objectId || orgLevel.externalId || null;
+    return (
+      orgLevel.id ||
+      orgLevel.objectId ||
+      orgLevel.externalId ||
+      null
+    );
   }
 
   return null;
@@ -458,7 +502,12 @@ function extractLocationFromServiceCall(serviceCall) {
     address.geoLongitude ||
     null;
 
-  if (!latitude || !longitude) {
+  if (
+    latitude === null ||
+    latitude === undefined ||
+    longitude === null ||
+    longitude === undefined
+  ) {
     return null;
   }
 
@@ -468,16 +517,14 @@ function extractLocationFromServiceCall(serviceCall) {
   };
 }
 
-function addSkillIfValid(skills, value) {
-  if (!value) return;
-
+function addStringIfValid(values, value) {
   if (typeof value !== "string") return;
 
   const cleaned = value.trim();
 
   if (!cleaned) return;
 
-  skills.push(cleaned);
+  values.push(cleaned);
 }
 
 function extractRequirementTagIds(requirementResponse) {
@@ -492,42 +539,55 @@ function extractRequirementTagIds(requirementResponse) {
 
     if (!requirement) continue;
 
+    /*
+     * Uzimamo samo mandatory requirements.
+     */
     if (requirement.mandatory === false) {
       continue;
     }
 
-    addSkillIfValid(tagIds, requirement.tag);
+    addStringIfValid(tagIds, requirement.tag);
   }
 
-  return [...new Set(tagIds.filter(Boolean))];
+  return [...new Set(tagIds)];
 }
 
-function extractSkillsFromTagResponse(tagResponse, fallbackTagId) {
+function extractSkillsFromTagResponse(
+  tagResponse,
+  fallbackTagId
+) {
   const tagWrapper = getFirstItem(tagResponse);
   const tag = unwrapTag(tagWrapper);
 
   const skills = [];
 
   if (tag) {
-    // Optimization je ranije radio sa vrednostima kao "FTTH" i "10173".
-    // Zato prvo šaljemo externalId/name, a id samo kao poslednji fallback.
-    addSkillIfValid(skills, tag.externalId);
-    addSkillIfValid(skills, tag.name);
+    /*
+     * Optimization je uspešno radio sa externalId/name,
+     * npr. "10010".
+     */
+    addStringIfValid(skills, tag.externalId);
+    addStringIfValid(skills, tag.name);
 
     if (skills.length === 0) {
-      addSkillIfValid(skills, tag.id);
+      addStringIfValid(skills, tag.id);
     }
   }
 
   if (skills.length === 0) {
-    addSkillIfValid(skills, fallbackTagId);
+    addStringIfValid(skills, fallbackTagId);
   }
 
-  return [...new Set(skills.filter(Boolean))];
+  return [...new Set(skills)];
 }
 
-async function resolveRequirementSkills(requirementResponse, token) {
-  const tagIds = extractRequirementTagIds(requirementResponse);
+async function resolveRequirementSkills(
+  requirementResponse,
+  token
+) {
+  const tagIds = extractRequirementTagIds(
+    requirementResponse
+  );
 
   console.log("Requirement Tag IDs:", tagIds);
 
@@ -535,142 +595,51 @@ async function resolveRequirementSkills(requirementResponse, token) {
   const tagLookups = [];
 
   for (const tagId of tagIds) {
-    try {
-      const tagLookup = await getTag(tagId, token);
+    const tagLookup = await getTag(tagId, token);
 
-      const skillsFromTag = extractSkillsFromTagResponse(
+    const skillsFromTag =
+      extractSkillsFromTagResponse(
         tagLookup.response,
         tagId
       );
 
-      tagLookups.push({
-        tagId,
-        success: true,
-        queryUsed: tagLookup.queryUsed,
-        skillsFromTag,
-        tagResponse: tagLookup.response
-      });
+    tagLookups.push({
+      tagId,
+      success: skillsFromTag.length > 0,
+      queryUsed: tagLookup.queryUsed,
+      skillsFromTag
+    });
 
-      resolvedSkills.push(...skillsFromTag);
-    } catch (error) {
-      const status = error.response?.status || null;
-      const data = error.response?.data || error.message;
-
-      console.log(
-        "Tag lookup failed:",
-        tagId,
-        status,
-        JSON.stringify(data)
-      );
-
-      tagLookups.push({
-        tagId,
-        success: false,
-        status,
-        error: data
-      });
-
-      resolvedSkills.push(tagId);
-    }
+    resolvedSkills.push(...skillsFromTag);
   }
 
   return {
-    mandatorySkills: [...new Set(resolvedSkills.filter(Boolean))],
+    mandatorySkills: [...new Set(resolvedSkills)],
     tagIds,
     tagLookups
   };
 }
 
-function extractPersonSkills(personWrapper) {
-  const person = unwrapPerson(personWrapper);
-
-  if (!person) return [];
-
-  const skills = [];
-
-  const skillCollections = [
-    person.skills,
-    person.mandatorySkills,
-    person.requiredSkills
-  ];
-
-  for (const collection of skillCollections) {
-    if (!Array.isArray(collection)) continue;
-
-    for (const item of collection) {
-      if (typeof item === "string") {
-        addSkillIfValid(skills, item);
-        continue;
-      }
-
-      if (item && typeof item === "object") {
-        addSkillIfValid(skills, item.externalId);
-        addSkillIfValid(skills, item.name);
-        addSkillIfValid(skills, item.id);
-        addSkillIfValid(skills, item.refId);
-
-        if (item.skill && typeof item.skill === "object") {
-          addSkillIfValid(skills, item.skill.externalId);
-          addSkillIfValid(skills, item.skill.name);
-          addSkillIfValid(skills, item.skill.id);
-          addSkillIfValid(skills, item.skill.refId);
-        }
-
-        if (typeof item.skill === "string") {
-          addSkillIfValid(skills, item.skill);
-        }
-      }
-    }
-  }
-
-  return [...new Set(skills.filter(Boolean))];
-}
-
-function compareSkills(requiredSkills, personSkills) {
-  const personSet = new Set(personSkills.map((item) => String(item).toLowerCase()));
-
-  const matched = [];
-  const missing = [];
-
-  for (const skill of requiredSkills) {
-    if (personSet.has(String(skill).toLowerCase())) {
-      matched.push(skill);
-    } else {
-      missing.push(skill);
-    }
-  }
-
-  return {
-    matched,
-    missing,
-    allMatched: missing.length === 0
-  };
-}
-
-function buildOptimizationPayload(reqBody, serviceCall, mandatorySkillsFromRequirements) {
-  const durationFromServiceCall = extractDurationFromServiceCall(serviceCall);
-  const locationFromServiceCall = extractLocationFromServiceCall(serviceCall);
-
+function buildOptimizationPayload(
+  reqBody,
+  serviceCall,
+  mandatorySkills
+) {
   const fallbackJob = reqBody.job || {};
 
   const durationMinutes =
-    durationFromServiceCall ||
+    extractDurationFromServiceCall(serviceCall) ||
     fallbackJob.durationMinutes ||
     fallbackJob.durationInMinutes ||
     60;
 
   const location =
-    locationFromServiceCall ||
+    extractLocationFromServiceCall(serviceCall) ||
     fallbackJob.location ||
     {
       latitude: 38.0344,
       longitude: 23.1283
     };
-
-  const mandatorySkills =
-    mandatorySkillsFromRequirements.length > 0
-      ? mandatorySkillsFromRequirements
-      : fallbackJob.mandatorySkills || [];
 
   return {
     job: {
@@ -682,7 +651,8 @@ function buildOptimizationPayload(reqBody, serviceCall, mandatorySkillsFromRequi
       filters: {
         includeInternalPersons: true,
         includeCrowdPersons: false,
-        includeMandatorySkills: mandatorySkills.length > 0
+        includeMandatorySkills:
+          mandatorySkills.length > 0
       }
     },
     slots: generateRollingSlots(),
@@ -690,7 +660,70 @@ function buildOptimizationPayload(reqBody, serviceCall, mandatorySkillsFromRequi
       maxResultsPerSlot: 5,
       defaultDrivingTimeMinutes: 30
     },
-    policy: reqBody.policy || "DistanceAndSkills"
+    policy:
+      reqBody.policy ||
+      "DistanceAndSkills"
+  };
+}
+
+/**
+ * Proverava da li se Optimization rezultat nalazi
+ * potpuno unutar slota koji mu pripada.
+ */
+function isResultInsideSlot(result) {
+  if (
+    !result ||
+    !result.start ||
+    !result.end ||
+    !result.slot?.start ||
+    !result.slot?.end
+  ) {
+    return false;
+  }
+
+  const resultStart = DateTime.fromISO(
+    result.start,
+    { setZone: true }
+  );
+
+  const resultEnd = DateTime.fromISO(
+    result.end,
+    { setZone: true }
+  );
+
+  const slotStart = DateTime.fromISO(
+    result.slot.start,
+    { setZone: true }
+  );
+
+  const slotEnd = DateTime.fromISO(
+    result.slot.end,
+    { setZone: true }
+  );
+
+  if (
+    !resultStart.isValid ||
+    !resultEnd.isValid ||
+    !slotStart.isValid ||
+    !slotEnd.isValid
+  ) {
+    return false;
+  }
+
+  return (
+    resultStart.toMillis() >= slotStart.toMillis() &&
+    resultEnd.toMillis() <= slotEnd.toMillis()
+  );
+}
+
+function normalizeOptimizationResult(result) {
+  return {
+    slot: result.slot || null,
+    resource: result.resource,
+    start: result.start,
+    end: result.end,
+    trip: result.trip || null,
+    score: result.score ?? null
   };
 }
 
@@ -701,222 +734,333 @@ app.get("/health", (req, res) => {
   });
 });
 
-app.post("/score-with-org-level", async (req, res) => {
-  try {
-    console.log("Received request from FSM.");
-    console.log("Incoming body:", JSON.stringify(req.body, null, 2));
+app.post(
+  "/score-with-org-level",
+  async (req, res) => {
+    try {
+      console.log("Received request from FSM.");
+      console.log(
+        "Incoming body:",
+        JSON.stringify(req.body, null, 2)
+      );
 
-    const token = await getFsmToken();
+      const serviceCallId = req.body.serviceCallId;
 
-    if (!req.body.serviceCallId && !req.body.job) {
-      return res.status(400).json({
-        error: "Missing serviceCallId or fallback job payload"
-      });
-    }
+      if (!serviceCallId) {
+        return res.status(400).json({
+          error: "serviceCallId is required"
+        });
+      }
 
-    let serviceCall = null;
-    let serviceCallResponse = null;
-    let requirementLookup = null;
-    let resolvedRequirementSkills = {
-      mandatorySkills: [],
-      tagIds: [],
-      tagLookups: []
-    };
+      const token = await getFsmToken();
 
-    if (req.body.serviceCallId) {
-      serviceCallResponse = await getServiceCall(req.body.serviceCallId, token);
+      const serviceCallResponse =
+        await getServiceCall(
+          serviceCallId,
+          token
+        );
 
-      console.log("ServiceCall response:", JSON.stringify(serviceCallResponse, null, 2));
+      const serviceCallWrapper =
+        getFirstItem(serviceCallResponse);
 
-      const serviceCallWrapper = getFirstItem(serviceCallResponse);
-      serviceCall = unwrapServiceCall(serviceCallWrapper);
+      const serviceCall =
+        unwrapServiceCall(serviceCallWrapper);
 
       if (!serviceCall) {
         return res.status(400).json({
           error: "ServiceCall not found",
-          serviceCallId: req.body.serviceCallId,
-          serviceCallResponse
+          serviceCallId
         });
       }
 
-      requirementLookup = await getRequirementsForServiceCall(
-        req.body.serviceCallId,
-        token
-      );
+      const requirementLookup =
+        await getRequirementsForServiceCall(
+          serviceCallId,
+          token
+        );
 
-      resolvedRequirementSkills = await resolveRequirementSkills(
-        requirementLookup.response,
-        token
-      );
+      const resolvedRequirementSkills =
+        await resolveRequirementSkills(
+          requirementLookup.response,
+          token
+        );
 
-      console.log("Requirement query used:", requirementLookup.queryUsed);
-      console.log("Requirement Tag IDs:", resolvedRequirementSkills.tagIds);
-      console.log(
-        "Mandatory skills resolved from Tag DTO:",
-        resolvedRequirementSkills.mandatorySkills
-      );
-
-      if (resolvedRequirementSkills.mandatorySkills.length === 0) {
+      if (
+        resolvedRequirementSkills
+          .mandatorySkills.length === 0
+      ) {
         return res.status(400).json({
-          error: "No mandatory skills resolved from Requirement / Tag DTO",
-          serviceCallId: req.body.serviceCallId,
-          requirementQueryUsed: requirementLookup.queryUsed,
-          requirementResponse: requirementLookup.response,
-          tagLookups: resolvedRequirementSkills.tagLookups,
-          hint:
-            "Requirement exists, but Requirement.tag could not be resolved through Tag DTO."
+          error:
+            "No mandatory skills resolved from Requirement and Tag DTO",
+          serviceCallId,
+          requirementQueryUsed:
+            requirementLookup.queryUsed,
+          requirementTagIds:
+            resolvedRequirementSkills.tagIds,
+          tagLookups:
+            resolvedRequirementSkills.tagLookups
         });
       }
-    }
 
-    const optimizationPayload = buildOptimizationPayload(
-      req.body,
-      serviceCall,
-      resolvedRequirementSkills.mandatorySkills
-    );
+      const optimizationPayload =
+        buildOptimizationPayload(
+          req.body,
+          serviceCall,
+          resolvedRequirementSkills.mandatorySkills
+        );
 
-    console.log(
-      "Generated 30-minute rolling slots count:",
-      optimizationPayload.slots.length
-    );
+      console.log(
+        "Generated slots count:",
+        optimizationPayload.slots.length
+      );
 
-    console.log(
-      "Mandatory skills used:",
-      optimizationPayload.job.mandatorySkills
-    );
+      console.log(
+        "Mandatory skills used:",
+        optimizationPayload.job.mandatorySkills
+      );
 
-    console.log(
-      "Optimization payload:",
-      JSON.stringify(optimizationPayload, null, 2)
-    );
-
-    const scoreResponse = await axios.post(
-      OPTIMIZATION_URL,
-      optimizationPayload,
-      {
-        headers: fsmHeaders(token)
-      }
-    );
-
-    const scoreData = scoreResponse.data;
-
-    console.log("Optimization response:", JSON.stringify(scoreData, null, 2));
-
-    const availableResults = Array.isArray(scoreData.results)
-      ? scoreData.results.filter(
-          (item) => item && item.resource && item.start && item.end
+      console.log(
+        "Optimization summary:",
+        JSON.stringify(
+          {
+            job: optimizationPayload.job,
+            resources:
+              optimizationPayload.resources,
+            options:
+              optimizationPayload.options,
+            policy:
+              optimizationPayload.policy,
+            slotsCount:
+              optimizationPayload.slots.length,
+            firstSlot:
+              optimizationPayload.slots[0] ||
+              null,
+            lastSlot:
+              optimizationPayload.slots[
+                optimizationPayload.slots.length - 1
+              ] || null
+          },
+          null,
+          2
         )
-      : [];
+      );
 
-    const bestResult = availableResults[0];
-
-    if (!bestResult) {
-      return res.status(400).json({
-        error: "No available optimization result found",
+      const scoreResponse = await axios.post(
+        OPTIMIZATION_URL,
         optimizationPayload,
-        scoreData
-      });
-    }
-
-    const resourceId = bestResult.resource;
-
-    const personResponse = await getPerson(resourceId, token);
-
-    console.log("Person response:", JSON.stringify(personResponse, null, 2));
-
-    const personWrapper = getFirstItem(personResponse);
-
-    if (!personWrapper) {
-      return res.status(400).json({
-        error: "Person not found",
-        resourceId,
-        personResponse
-      });
-    }
-
-    const orgLevel = extractOrgLevel(personWrapper);
-
-    if (!orgLevel) {
-      return res.status(400).json({
-        error: "Org level not found on Person",
-        resourceId,
-        person: personWrapper
-      });
-    }
-
-    const personSkills = extractPersonSkills(personWrapper);
-    const skillMatch = compareSkills(
-      optimizationPayload.job.mandatorySkills,
-      personSkills
-    );
-
-    const alternatives = availableResults
-      .slice(1, 6)
-      .map((item) => ({
-        slot: item.slot || null,
-        resource: item.resource,
-        start: item.start,
-        end: item.end,
-        trip: item.trip || null,
-        score: item.score || null
-      }));
-
-    const enrichedResponse = {
-      results: [
         {
-          ...bestResult,
-          orgLevel,
-          requiredSkills: optimizationPayload.job.mandatorySkills,
-          personSkills,
-          skillMatch
+          headers: fsmHeaders(token)
         }
-      ],
-      alternatives,
-      generatedSlotsCount: optimizationPayload.slots.length,
-      mandatorySkillsUsed: optimizationPayload.job.mandatorySkills,
-      requirementQueryUsed: requirementLookup?.queryUsed || null,
-      requirementTagIds: resolvedRequirementSkills.tagIds,
-      tagLookups: resolvedRequirementSkills.tagLookups
-    };
+      );
 
-    console.log(
-      "Returning enriched response:",
-      JSON.stringify(enrichedResponse, null, 2)
-    );
+      const scoreData = scoreResponse.data;
 
-    return res.json(enrichedResponse);
-  } catch (error) {
-    console.error("Wrapper endpoint failed:", error.message);
+      const allResults =
+        Array.isArray(scoreData.results)
+          ? scoreData.results.filter(
+              (item) =>
+                item &&
+                item.resource &&
+                item.start &&
+                item.end
+            )
+          : [];
 
-    if (error.response) {
-      console.error("Response status:", error.response.status);
-      console.error("Response data:", JSON.stringify(error.response.data, null, 2));
+      const validResults =
+        allResults.filter(isResultInsideSlot);
+
+      const rejectedResults =
+        allResults
+          .filter(
+            (result) =>
+              !isResultInsideSlot(result)
+          )
+          .map(normalizeOptimizationResult);
+
+      console.log(
+        "Optimization result counts:",
+        {
+          total: allResults.length,
+          validInsideSlot:
+            validResults.length,
+          rejectedOutsideSlot:
+            rejectedResults.length
+        }
+      );
+
+      if (rejectedResults.length > 0) {
+        console.log(
+          "Rejected results outside slot:",
+          JSON.stringify(
+            rejectedResults.slice(0, 10),
+            null,
+            2
+          )
+        );
+      }
+
+      const bestResult = validResults[0];
+
+      if (!bestResult) {
+        return res.status(400).json({
+          error:
+            "Optimization returned results, but none are completely inside their 30-minute slot",
+          mandatorySkillsUsed:
+            optimizationPayload.job
+              .mandatorySkills,
+          generatedSlotsCount:
+            optimizationPayload.slots.length,
+          totalOptimizationResults:
+            allResults.length,
+          rejectedResults:
+            rejectedResults.slice(0, 10),
+          scoreData
+        });
+      }
+
+      const resourceId =
+        bestResult.resource;
+
+      const personResponse =
+        await getPerson(resourceId, token);
+
+      const personWrapper =
+        getFirstItem(personResponse);
+
+      if (!personWrapper) {
+        return res.status(400).json({
+          error: "Person not found",
+          resourceId
+        });
+      }
+
+      const orgLevel =
+        extractOrgLevel(personWrapper);
+
+      if (!orgLevel) {
+        return res.status(400).json({
+          error:
+            "Org level not found on Person",
+          resourceId,
+          person: personWrapper
+        });
+      }
+
+      const alternatives =
+        validResults
+          .slice(1, 6)
+          .map(normalizeOptimizationResult);
+
+      const enrichedResponse = {
+        results: [
+          {
+            ...normalizeOptimizationResult(
+              bestResult
+            ),
+            orgLevel,
+            requiredSkills:
+              optimizationPayload.job
+                .mandatorySkills
+          }
+        ],
+        alternatives,
+        generatedSlotsCount:
+          optimizationPayload.slots.length,
+        mandatorySkillsUsed:
+          optimizationPayload.job
+            .mandatorySkills,
+        requirementQueryUsed:
+          requirementLookup.queryUsed,
+        requirementTagIds:
+          resolvedRequirementSkills.tagIds,
+        validResultsCount:
+          validResults.length,
+        rejectedOutsideSlotCount:
+          rejectedResults.length
+      };
+
+      console.log(
+        "Returning enriched response:",
+        JSON.stringify(
+          enrichedResponse,
+          null,
+          2
+        )
+      );
+
+      return res.json(enrichedResponse);
+    } catch (error) {
+      console.error(
+        "Wrapper endpoint failed:",
+        error.message
+      );
+
+      if (error.response) {
+        console.error(
+          "Response status:",
+          error.response.status
+        );
+
+        console.error(
+          "Response data:",
+          JSON.stringify(
+            error.response.data,
+            null,
+            2
+          )
+        );
+      }
+
+      return res.status(500).json({
+        error: "Wrapper endpoint failed",
+        message: error.message,
+        response:
+          error.response?.data || null
+      });
     }
-
-    return res.status(500).json({
-      error: "Wrapper endpoint failed",
-      message: error.message,
-      response: error.response?.data || null
-    });
   }
-});
+);
 
-const host = process.env.HOST || "0.0.0.0";
+const host =
+  process.env.HOST || "0.0.0.0";
+
 const port = Number(PORT);
 
-const server = app.listen(port, host, () => {
-  console.log(`FSM score wrapper running on ${host}:${port}`);
-  console.log("Health check: /health");
-});
+const server = app.listen(
+  port,
+  host,
+  () => {
+    console.log(
+      `FSM score wrapper running on ${host}:${port}`
+    );
+
+    console.log("Health check: /health");
+  }
+);
 
 server.on("error", (error) => {
-  console.error("Server failed to start:", error);
+  console.error(
+    "Server failed to start:",
+    error
+  );
 });
 
-process.on("unhandledRejection", (reason) => {
-  console.error("Unhandled rejection:", reason);
-});
+process.on(
+  "unhandledRejection",
+  (reason) => {
+    console.error(
+      "Unhandled rejection:",
+      reason
+    );
+  }
+);
 
-process.on("uncaughtException", (error) => {
-  console.error("Uncaught exception:", error);
-});
+process.on(
+  "uncaughtException",
+  (error) => {
+    console.error(
+      "Uncaught exception:",
+      error
+    );
+  }
+);
