@@ -19,7 +19,7 @@ const {
   FSM_REQUIREMENT_DTO = "Requirement.10",
   FSM_PERSON_DTO = "Person.25",
   FSM_SERVICE_CALL_DTO = "ServiceCall.27",
-  FSM_SKILL_DTO = "Skill.10"
+  FSM_TAG_DTO = "Tag.10"
 } = process.env;
 
 if (
@@ -45,7 +45,7 @@ if (
     FSM_REQUIREMENT_DTO,
     FSM_PERSON_DTO,
     FSM_SERVICE_CALL_DTO,
-    FSM_SKILL_DTO
+    FSM_TAG_DTO
   });
   process.exit(1);
 }
@@ -200,23 +200,22 @@ async function getPerson(resourceId, token) {
   return response.data;
 }
 
-async function getSkill(skillId, token) {
-  console.log("Getting Skill:", skillId);
+async function getTag(tagId, token) {
+  console.log("Getting Tag:", tagId);
 
   const queriesToTry = [
-    `id="${skillId}"`,
-    `externalId="${skillId}"`,
-    `code="${skillId}"`,
-    `name="${skillId}"`
+    `id="${tagId}"`,
+    `externalId="${tagId}"`,
+    `name="${tagId}"`
   ];
 
   const errors = [];
 
   for (const query of queriesToTry) {
-    const url = dataApiUrl("Skill", FSM_SKILL_DTO, query);
+    const url = dataApiUrl("Tag", FSM_TAG_DTO, query);
 
     try {
-      console.log("Trying Skill query:", query);
+      console.log("Trying Tag query:", query);
 
       const response = await axios.get(url, {
         headers: fsmHeaders(token)
@@ -225,8 +224,8 @@ async function getSkill(skillId, token) {
       const data = response.data;
       const rows = Array.isArray(data?.data) ? data.data : [];
 
-      console.log("Skill query result count:", rows.length);
-      console.log("Skill response:", JSON.stringify(data, null, 2));
+      console.log("Tag query result count:", rows.length);
+      console.log("Tag response:", JSON.stringify(data, null, 2));
 
       if (rows.length > 0) {
         return {
@@ -245,7 +244,7 @@ async function getSkill(skillId, token) {
       });
 
       console.log(
-        "Skill query failed:",
+        "Tag query failed:",
         query,
         status,
         JSON.stringify(data)
@@ -371,15 +370,13 @@ function unwrapRequirement(requirementWrapper) {
   );
 }
 
-function unwrapSkill(skillWrapper) {
-  if (!skillWrapper) return null;
+function unwrapTag(tagWrapper) {
+  if (!tagWrapper) return null;
 
   return (
-    skillWrapper.skill ||
-    skillWrapper.Skill ||
-    skillWrapper.tag ||
-    skillWrapper.Tag ||
-    skillWrapper
+    tagWrapper.tag ||
+    tagWrapper.Tag ||
+    tagWrapper
   );
 }
 
@@ -483,12 +480,12 @@ function addSkillIfValid(skills, value) {
   skills.push(cleaned);
 }
 
-function extractRequirementSkillIds(requirementResponse) {
+function extractRequirementTagIds(requirementResponse) {
   const rows = Array.isArray(requirementResponse?.data)
     ? requirementResponse.data
     : [];
 
-  const skillIds = [];
+  const tagIds = [];
 
   for (const row of rows) {
     const requirement = unwrapRequirement(row);
@@ -499,108 +496,88 @@ function extractRequirementSkillIds(requirementResponse) {
       continue;
     }
 
-    // Kod tebe Requirement.tag pokazuje na Skill DTO
-    addSkillIfValid(skillIds, requirement.tag);
-
-    if (requirement.skill && typeof requirement.skill === "string") {
-      addSkillIfValid(skillIds, requirement.skill);
-    }
-
-    if (requirement.skill && typeof requirement.skill === "object") {
-      addSkillIfValid(skillIds, requirement.skill.id);
-      addSkillIfValid(skillIds, requirement.skill.refId);
-      addSkillIfValid(skillIds, requirement.skill.code);
-      addSkillIfValid(skillIds, requirement.skill.name);
-      addSkillIfValid(skillIds, requirement.skill.externalId);
-    }
-
-    addSkillIfValid(skillIds, requirement.skillId);
-    addSkillIfValid(skillIds, requirement.skillCode);
-    addSkillIfValid(skillIds, requirement.skillName);
-    addSkillIfValid(skillIds, requirement.mandatorySkillId);
-    addSkillIfValid(skillIds, requirement.requiredSkillId);
+    addSkillIfValid(tagIds, requirement.tag);
   }
 
-  return [...new Set(skillIds.filter(Boolean))];
+  return [...new Set(tagIds.filter(Boolean))];
 }
 
-function extractSkillsFromSkillResponse(skillResponse, fallbackSkillId) {
-  const skillWrapper = getFirstItem(skillResponse);
-  const skill = unwrapSkill(skillWrapper);
+function extractSkillsFromTagResponse(tagResponse, fallbackTagId) {
+  const tagWrapper = getFirstItem(tagResponse);
+  const tag = unwrapTag(tagWrapper);
 
   const skills = [];
 
-  if (skill) {
-    addSkillIfValid(skills, skill.code);
-    addSkillIfValid(skills, skill.name);
-    addSkillIfValid(skills, skill.externalId);
-    addSkillIfValid(skills, skill.refId);
+  if (tag) {
+    // Optimization je ranije radio sa vrednostima kao "FTTH" i "10173".
+    // Zato prvo šaljemo externalId/name, a id samo kao poslednji fallback.
+    addSkillIfValid(skills, tag.externalId);
+    addSkillIfValid(skills, tag.name);
 
-    // id koristimo samo ako nema boljeg identifikatora
     if (skills.length === 0) {
-      addSkillIfValid(skills, skill.id);
+      addSkillIfValid(skills, tag.id);
     }
   }
 
   if (skills.length === 0) {
-    addSkillIfValid(skills, fallbackSkillId);
+    addSkillIfValid(skills, fallbackTagId);
   }
 
   return [...new Set(skills.filter(Boolean))];
 }
 
 async function resolveRequirementSkills(requirementResponse, token) {
-  const skillIds = extractRequirementSkillIds(requirementResponse);
+  const tagIds = extractRequirementTagIds(requirementResponse);
 
-  console.log("Requirement Skill IDs:", skillIds);
+  console.log("Requirement Tag IDs:", tagIds);
 
   const resolvedSkills = [];
-  const skillLookups = [];
+  const tagLookups = [];
 
-  for (const skillId of skillIds) {
+  for (const tagId of tagIds) {
     try {
-      const skillLookup = await getSkill(skillId, token);
+      const tagLookup = await getTag(tagId, token);
 
-      const skillsFromSkill = extractSkillsFromSkillResponse(
-        skillLookup.response,
-        skillId
+      const skillsFromTag = extractSkillsFromTagResponse(
+        tagLookup.response,
+        tagId
       );
 
-      skillLookups.push({
-        skillId,
+      tagLookups.push({
+        tagId,
         success: true,
-        queryUsed: skillLookup.queryUsed,
-        skillsFromSkill,
-        skillResponse: skillLookup.response
+        queryUsed: tagLookup.queryUsed,
+        skillsFromTag,
+        tagResponse: tagLookup.response
       });
 
-      resolvedSkills.push(...skillsFromSkill);
+      resolvedSkills.push(...skillsFromTag);
     } catch (error) {
       const status = error.response?.status || null;
       const data = error.response?.data || error.message;
 
       console.log(
-        "Skill lookup failed:",
-        skillId,
+        "Tag lookup failed:",
+        tagId,
         status,
         JSON.stringify(data)
       );
 
-      skillLookups.push({
-        skillId,
+      tagLookups.push({
+        tagId,
         success: false,
         status,
         error: data
       });
 
-      resolvedSkills.push(skillId);
+      resolvedSkills.push(tagId);
     }
   }
 
   return {
     mandatorySkills: [...new Set(resolvedSkills.filter(Boolean))],
-    skillIds,
-    skillLookups
+    tagIds,
+    tagLookups
   };
 }
 
@@ -627,16 +604,14 @@ function extractPersonSkills(personWrapper) {
       }
 
       if (item && typeof item === "object") {
-        addSkillIfValid(skills, item.code);
-        addSkillIfValid(skills, item.name);
         addSkillIfValid(skills, item.externalId);
+        addSkillIfValid(skills, item.name);
         addSkillIfValid(skills, item.id);
         addSkillIfValid(skills, item.refId);
 
         if (item.skill && typeof item.skill === "object") {
-          addSkillIfValid(skills, item.skill.code);
-          addSkillIfValid(skills, item.skill.name);
           addSkillIfValid(skills, item.skill.externalId);
+          addSkillIfValid(skills, item.skill.name);
           addSkillIfValid(skills, item.skill.id);
           addSkillIfValid(skills, item.skill.refId);
         }
@@ -744,8 +719,8 @@ app.post("/score-with-org-level", async (req, res) => {
     let requirementLookup = null;
     let resolvedRequirementSkills = {
       mandatorySkills: [],
-      skillIds: [],
-      skillLookups: []
+      tagIds: [],
+      tagLookups: []
     };
 
     if (req.body.serviceCallId) {
@@ -775,21 +750,21 @@ app.post("/score-with-org-level", async (req, res) => {
       );
 
       console.log("Requirement query used:", requirementLookup.queryUsed);
-      console.log("Requirement Skill IDs:", resolvedRequirementSkills.skillIds);
+      console.log("Requirement Tag IDs:", resolvedRequirementSkills.tagIds);
       console.log(
-        "Mandatory skills resolved from Skill DTO:",
+        "Mandatory skills resolved from Tag DTO:",
         resolvedRequirementSkills.mandatorySkills
       );
 
       if (resolvedRequirementSkills.mandatorySkills.length === 0) {
         return res.status(400).json({
-          error: "No mandatory skills resolved from Requirement / Skill DTO",
+          error: "No mandatory skills resolved from Requirement / Tag DTO",
           serviceCallId: req.body.serviceCallId,
           requirementQueryUsed: requirementLookup.queryUsed,
           requirementResponse: requirementLookup.response,
-          skillLookups: resolvedRequirementSkills.skillLookups,
+          tagLookups: resolvedRequirementSkills.tagLookups,
           hint:
-            "Requirement exists, but Requirement.tag could not be resolved through Skill DTO."
+            "Requirement exists, but Requirement.tag could not be resolved through Tag DTO."
         });
       }
     }
@@ -900,8 +875,8 @@ app.post("/score-with-org-level", async (req, res) => {
       generatedSlotsCount: optimizationPayload.slots.length,
       mandatorySkillsUsed: optimizationPayload.job.mandatorySkills,
       requirementQueryUsed: requirementLookup?.queryUsed || null,
-      requirementSkillIds: resolvedRequirementSkills.skillIds,
-      skillLookups: resolvedRequirementSkills.skillLookups
+      requirementTagIds: resolvedRequirementSkills.tagIds,
+      tagLookups: resolvedRequirementSkills.tagLookups
     };
 
     console.log(
