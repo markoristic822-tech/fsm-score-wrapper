@@ -4,6 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "generate:matrix": "node scripts/generate-allocation-matrix.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -15,5 +16,8 @@
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "luxon": "^3.7.2"
+  },
+  "devDependencies": {
+    "xlsx": "^0.18.5"
   }
 }

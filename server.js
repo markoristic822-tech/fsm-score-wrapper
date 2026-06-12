@@ -1,5 +1,7 @@
 const express = require("express");
 const axios = require("axios");
+const fs = require("fs");
+const path = require("path");
 const { DateTime } = require("luxon");
 require("dotenv").config();
 
@@ -32,49 +34,36 @@ const PERSON_CONTRACTOR_UDF_META_ID =
   "69EBF33B64E94531A4932604E1097E58";
 
 /*
- * Matrica zavisi isključivo od kombinacije skillova.
- *
- * Jedan skill:
- * 10010
- *
- * Više skillova:
- * 10010|10173
+ * Matrica se generise iz matrix.xlsx u allocation-matrix.json.
+ * Key je kombinacija skillova koju FSM vrati kroz Requirement/Tag DTO,
+ * npr. postal code + tip posla: 10010|FWA.
  */
-const CONTRACTOR_ALLOCATION_MATRIX = {
-  "10010": {
-    ICOM: 70,
-    SAT_PRAXIS: 30
-  }
+const ALLOCATION_MATRIX_PATH =
+  process.env.ALLOCATION_MATRIX_PATH ||
+  path.join(
+    __dirname,
+    "allocation-matrix.json"
+  );
 
-  /*
-  "10010|10173": {
-    ICOM: 60,
-    SAT_PRAXIS: 40
-  }
-  */
-};
+const allocationConfig =
+  loadAllocationConfig(
+    ALLOCATION_MATRIX_PATH
+  );
+
+const CONTRACTOR_ALLOCATION_MATRIX =
+  allocationConfig.matrix;
+
+const CONTRACTOR_CODE_ALIASES =
+  allocationConfig.contractorCodeMap ||
+  {};
 
 /*
- * Ravnomerno raspoređena sekvenca 70:30.
- *
- * U svakih 10 uspešnih dodela:
- * ICOM dobija 7,
- * SAT_PRAXIS dobija 3.
+ * Sekvence se generisu iz procentualnih odnosa u matrici.
  */
-const CONTRACTOR_ALLOCATION_SEQUENCES = {
-  "10010": [
-    "ICOM",
-    "ICOM",
-    "SAT_PRAXIS",
-    "ICOM",
-    "ICOM",
-    "SAT_PRAXIS",
-    "ICOM",
-    "ICOM",
-    "SAT_PRAXIS",
-    "ICOM"
-  ]
-};
+const CONTRACTOR_ALLOCATION_SEQUENCES =
+  buildContractorAllocationSequences(
+    CONTRACTOR_ALLOCATION_MATRIX
+  );
 
 /*
  * Privremeni brojači u memoriji.
@@ -85,6 +74,131 @@ const CONTRACTOR_ALLOCATION_SEQUENCES = {
 const allocationCounters = {};
 
 validateEnvironment();
+
+function loadAllocationConfig(configPath) {
+  if (!fs.existsSync(configPath)) {
+    console.error(
+      "Allocation matrix file not found:",
+      configPath
+    );
+    console.error(
+      "Run: npm run generate:matrix"
+    );
+    process.exit(1);
+  }
+
+  const rawConfig =
+    JSON.parse(
+      fs.readFileSync(
+        configPath,
+        "utf8"
+      )
+    );
+
+  const matrix =
+    rawConfig.matrix || rawConfig;
+
+  if (
+    !matrix ||
+    typeof matrix !== "object" ||
+    Array.isArray(matrix)
+  ) {
+    console.error(
+      "Allocation matrix file has invalid format:",
+      configPath
+    );
+    process.exit(1);
+  }
+
+  console.log(
+    "Allocation matrix loaded:",
+    {
+      path: configPath,
+      entries:
+        Object.keys(matrix).length,
+      generatedAt:
+        rawConfig.generatedAt ||
+        null,
+      warnings:
+        rawConfig.warnings?.length ||
+        0
+    }
+  );
+
+  return {
+    ...rawConfig,
+    matrix
+  };
+}
+
+function createSmoothWeightedSequence(weights) {
+  const entries = Object.entries(weights)
+    .map(([contractor, weight]) => ({
+      contractor,
+      weight: Number(weight) || 0,
+      current: 0
+    }))
+    .filter((entry) => entry.weight > 0);
+
+  if (entries.length === 0) {
+    return [];
+  }
+
+  if (entries.length === 1) {
+    return [
+      entries[0].contractor
+    ];
+  }
+
+  const totalWeight = entries.reduce(
+    (sum, entry) =>
+      sum + entry.weight,
+    0
+  );
+
+  const sequenceLength = 100;
+  const sequence = [];
+
+  for (
+    let index = 0;
+    index < sequenceLength;
+    index++
+  ) {
+    for (const entry of entries) {
+      entry.current +=
+        entry.weight;
+    }
+
+    entries.sort(
+      (first, second) =>
+        second.current -
+        first.current
+    );
+
+    const selected = entries[0];
+    sequence.push(
+      selected.contractor
+    );
+
+    selected.current -=
+      totalWeight;
+  }
+
+  return sequence;
+}
+
+function buildContractorAllocationSequences(matrix) {
+  return Object.fromEntries(
+    Object.entries(matrix).map(
+      ([matrixKey, weights]) => [
+        matrixKey,
+        createSmoothWeightedSequence(
+          weights
+        )
+      ]
+    )
+  );
+}
 
 function validateEnvironment() {
   const missing = [];
@@ -467,6 +581,28 @@ function normalizeContractorCode(value) {
     SAT_PRAXIS: "SAT_PRAXIS",
     SAT_PRAXIS_DOO: "SAT_PRAXIS"
   };
+
+  for (
+    const [name, code] of
+    Object.entries(CONTRACTOR_CODE_ALIASES)
+  ) {
+    const normalizedName = String(name)
+      .trim()
+      .toUpperCase()
+      .replace(/\s+/g, "_")
+      .replace(/-/g, "_");
+
+    const normalizedCode = String(code)
+      .trim()
+      .toUpperCase()
+      .replace(/\s+/g, "_")
+      .replace(/-/g, "_");
+
+    aliases[normalizedName] =
+      normalizedCode;
+    aliases[normalizedCode] =
+      normalizedCode;
+  }
 
   return aliases[normalized] || normalized;
 }
