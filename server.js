@@ -936,6 +936,26 @@ function buildSkillMatrixKey(skills) {
     .join("|");
 }
 
+function isPostalCodeSkill(skill) {
+  return /^\d{4,6}$/.test(
+    String(skill || "").trim()
+  );
+}
+
+function getOptimizationMandatorySkills(skills) {
+  return [
+    ...new Set(
+      skills
+        .map((skill) => String(skill).trim())
+        .filter(Boolean)
+        .filter(
+          (skill) =>
+            !isPostalCodeSkill(skill)
+        )
+    )
+  ];
+}
+
 function generateRollingSlots() {
   const timezone = "Europe/Athens";
   const daysAhead = 7;
@@ -1629,11 +1649,16 @@ app.post(
         });
       }
 
+      const optimizationMandatorySkills =
+        getOptimizationMandatorySkills(
+          mandatorySkills
+        );
+
       const optimizationPayload =
         buildOptimizationPayload(
           request.body,
           serviceCall,
-          mandatorySkills
+          optimizationMandatorySkills
         );
 
       console.log(
@@ -1643,8 +1668,13 @@ app.post(
       );
 
       console.log(
-        "Mandatory skills used:",
+        "Mandatory skills used for matrix:",
         mandatorySkills
+      );
+
+      console.log(
+        "Mandatory skills sent to Optimization:",
+        optimizationMandatorySkills
       );
 
       console.log(
@@ -1735,6 +1765,8 @@ app.post(
           matrixKey,
           mandatorySkillsUsed:
             mandatorySkills,
+          optimizationMandatorySkillsUsed:
+            optimizationMandatorySkills,
           generatedSlotsCount:
             optimizationPayload
               .slots.length,
@@ -1804,6 +1836,8 @@ app.post(
           matrixKey,
           mandatorySkillsUsed:
             mandatorySkills,
+          optimizationMandatorySkillsUsed:
+            optimizationMandatorySkills,
           resources:
             [
               ...new Map(
@@ -1843,6 +1877,8 @@ app.post(
           matrixKey,
           mandatorySkillsUsed:
             mandatorySkills,
+          optimizationMandatorySkillsUsed:
+            optimizationMandatorySkills,
           availableContractors
         });
       }
@@ -1856,6 +1892,8 @@ app.post(
           matrixKey,
           mandatorySkillsUsed:
             mandatorySkills,
+          optimizationMandatorySkillsUsed:
+            optimizationMandatorySkills,
           availableContractors,
           allocation
         });
@@ -1905,6 +1943,8 @@ app.post(
               bestResult.contractor,
             requiredSkills:
               mandatorySkills,
+            optimizationRequiredSkills:
+              optimizationMandatorySkills,
             selectionReason:
               allocation.reason
           }
@@ -1939,6 +1979,9 @@ app.post(
 
         mandatorySkillsUsed:
           mandatorySkills,
+
+        optimizationMandatorySkillsUsed:
+          optimizationMandatorySkills,
 
         requirementQueryUsed:
           requirementLookup
@@ -1992,11 +2035,21 @@ app.post(
         );
       }
 
-      return response.status(500).json({
+      const responseStatus =
+        error.response?.status &&
+        error.response.status >= 400 &&
+        error.response.status < 500
+          ? error.response.status
+          : 500;
+
+      return response.status(responseStatus).json({
         error:
           "Wrapper endpoint failed",
         message:
           error.message,
+        upstreamStatus:
+          error.response?.status ||
+          null,
         response:
           error.response?.data ||
           null
