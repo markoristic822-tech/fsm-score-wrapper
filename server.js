@@ -256,6 +256,33 @@ function dataApiUrl(dtoName, dtoVersion, query) {
   );
 }
 
+function fsmServiceUrl(pathname) {
+  return `${FSM_BASE_URL.replace(/\/+$/, "")}${pathname}`;
+}
+
+function fsmIdToUuid(fsmId) {
+  if (!fsmId) {
+    return null;
+  }
+
+  const normalized = String(fsmId)
+    .trim()
+    .replace(/-/g, "")
+    .toLowerCase();
+
+  if (!/^[0-9a-f]{32}$/.test(normalized)) {
+    return null;
+  }
+
+  return [
+    normalized.slice(0, 8),
+    normalized.slice(8, 12),
+    normalized.slice(12, 16),
+    normalized.slice(16, 20),
+    normalized.slice(20)
+  ].join("-");
+}
+
 async function getFsmToken() {
   console.log("Getting FSM token...");
 
@@ -322,6 +349,52 @@ async function getUnifiedPerson(resourceId, token) {
   });
 
   return response.data;
+}
+
+async function getOrgLevelName(orgLevelId, token) {
+  const orgLevelUuid = fsmIdToUuid(orgLevelId);
+
+  if (!orgLevelUuid) {
+    console.log(
+      "OrgLevel ID cannot be converted to UUID:",
+      orgLevelId
+    );
+
+    return null;
+  }
+
+  try {
+    console.log(
+      "Getting OrgLevel name:",
+      orgLevelUuid
+    );
+
+    const response = await axios.get(
+      fsmServiceUrl(
+        `/cloud-org-level-service/api/v1/levels/${orgLevelUuid}`
+      ),
+      {
+        headers: fsmHeaders(token)
+      }
+    );
+
+    const name =
+      response.data?.level?.name;
+
+    return typeof name === "string" &&
+      name.trim()
+      ? name
+      : null;
+  } catch (error) {
+    console.error(
+      "Failed to load OrgLevel name:",
+      orgLevelId,
+      error.response?.data ||
+        error.message
+    );
+
+    return null;
+  }
 }
 
 async function getRequirementsForServiceCall(serviceCallId, token) {
@@ -1327,17 +1400,48 @@ async function enrichOptimizationResultsWithPersonData(
     }
   }
 
+  const orgLevelNameCache = new Map();
+  const uniqueOrgLevelIds = [
+    ...new Set(
+      [...personDataCache.values()]
+        .map(
+          (personData) =>
+            personData.orgLevel
+        )
+        .filter(Boolean)
+    )
+  ];
+
+  for (const orgLevelId of uniqueOrgLevelIds) {
+    const orgLevelName =
+      await getOrgLevelName(
+        orgLevelId,
+        token
+      );
+
+    orgLevelNameCache.set(
+      orgLevelId,
+      orgLevelName
+    );
+  }
+
   return validResults.map((result) => {
     const personData =
       personDataCache.get(
         result.resource
       ) || {};
 
+    const orgLevel =
+      personData.orgLevel ||
+      null;
+
     return {
       ...result,
-      orgLevel:
-        personData.orgLevel ||
-        null,
+      orgLevel,
+      orgLevelName:
+        orgLevelNameCache.get(
+          orgLevel
+        ) ?? null,
       contractor:
         personData.contractor ||
         null
@@ -1994,6 +2098,9 @@ app.post(
             ),
             orgLevel:
               bestResult.orgLevel,
+            orgLevelName:
+              bestResult.orgLevelName ??
+              null,
             contractor:
               bestResult.contractor,
             requiredSkills:
