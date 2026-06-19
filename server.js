@@ -787,11 +787,8 @@ function extractOrgLevel(personWrapper) {
   const rawOrgLevel =
     person.orgLevel ||
     person.orgLevelId ||
-    person.orgLevelIds?.[0] ||
-    person.orgLevels?.[0] ||
     person.organizationLevel ||
     person.organizationLevelId ||
-    person.organizationLevelIds?.[0] ||
     null;
 
   return normalizeOrgLevel(rawOrgLevel);
