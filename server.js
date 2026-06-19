@@ -794,38 +794,6 @@ function extractOrgLevel(personWrapper) {
   return normalizeOrgLevel(rawOrgLevel);
 }
 
-function extractOrgLevelName(personWrapper) {
-  const person = unwrapPerson(personWrapper);
-
-  if (!person) {
-    return null;
-  }
-
-  const rawOrgLevel =
-    person.orgLevel ||
-    person.organizationLevel ||
-    null;
-
-  if (
-    !rawOrgLevel ||
-    typeof rawOrgLevel !== "object"
-  ) {
-    return null;
-  }
-
-  const name =
-    rawOrgLevel.name ||
-    rawOrgLevel.displayName ||
-    rawOrgLevel.shortDescription ||
-    rawOrgLevel.description ||
-    null;
-
-  return typeof name === "string" &&
-    name.trim()
-    ? name.trim()
-    : null;
-}
-
 function extractDurationFromServiceCall(serviceCall) {
   if (!serviceCall) {
     return null;
@@ -1367,11 +1335,6 @@ async function enrichOptimizationResultsWithPersonData(
           personWrapper
         );
 
-      const orgLevelName =
-        extractOrgLevelName(
-          personWrapper
-        );
-
       /*
        * UnifiedPerson koristimo za PersonContractor UDF.
        */
@@ -1404,7 +1367,6 @@ async function enrichOptimizationResultsWithPersonData(
         resourceId,
         {
           orgLevel,
-          orgLevelName,
           contractor
         }
       );
@@ -1414,8 +1376,7 @@ async function enrichOptimizationResultsWithPersonData(
         {
           resourceId,
           contractor,
-          orgLevel,
-          orgLevelName
+          orgLevel
         }
       );
     } catch (error) {
@@ -1430,7 +1391,6 @@ async function enrichOptimizationResultsWithPersonData(
         resourceId,
         {
           orgLevel: null,
-          orgLevelName: null,
           contractor: null
         }
       );
@@ -1476,10 +1436,9 @@ async function enrichOptimizationResultsWithPersonData(
       ...result,
       orgLevel,
       orgLevelName:
-        personData.orgLevelName ||
-        (orgLevelNameCache.get(
+        orgLevelNameCache.get(
           orgLevel
-        ) ?? null),
+        ) ?? null,
       contractor:
         personData.contractor ||
         null
