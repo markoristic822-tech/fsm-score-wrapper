@@ -603,6 +603,18 @@ function unwrapUnifiedPerson(wrapper) {
   );
 }
 
+function unwrapPersonLike(wrapper) {
+  if (!wrapper) return null;
+
+  return (
+    wrapper.person ||
+    wrapper.Person ||
+    wrapper.unifiedPerson ||
+    wrapper.UnifiedPerson ||
+    wrapper
+  );
+}
+
 function unwrapRequirement(wrapper) {
   if (!wrapper) return null;
 
@@ -778,7 +790,8 @@ function normalizeOrgLevel(orgLevel) {
 }
 
 function extractOrgLevel(personWrapper) {
-  const person = unwrapPerson(personWrapper);
+  const person =
+    unwrapPersonLike(personWrapper);
 
   if (!person) {
     return null;
@@ -1316,24 +1329,8 @@ async function enrichOptimizationResultsWithPersonData(
   for (const resourceId of uniqueResourceIds) {
     try {
       /*
-       * Person koristimo za orgLevel.
-       */
-      const personResponse =
-        await getPerson(
-          resourceId,
-          token
-        );
-
-      const personWrapper =
-        getFirstItem(personResponse);
-
-      const orgLevel =
-        extractOrgLevel(
-          personWrapper
-        );
-
-      /*
-       * UnifiedPerson koristimo za PersonContractor UDF.
+       * UnifiedPerson koristimo za orgLevel i
+       * PersonContractor UDF.
        */
       const unifiedPersonResponse =
         await getUnifiedPerson(
@@ -1353,6 +1350,11 @@ async function enrichOptimizationResultsWithPersonData(
       const unifiedPersonWrapper =
         getFirstItem(
           unifiedPersonResponse
+        );
+
+      const orgLevel =
+        extractOrgLevel(
+          unifiedPersonWrapper
         );
 
       const contractor =
