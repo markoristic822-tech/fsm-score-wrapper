@@ -603,18 +603,6 @@ function unwrapUnifiedPerson(wrapper) {
   );
 }
 
-function unwrapPersonLike(wrapper) {
-  if (!wrapper) return null;
-
-  return (
-    wrapper.person ||
-    wrapper.Person ||
-    wrapper.unifiedPerson ||
-    wrapper.UnifiedPerson ||
-    wrapper
-  );
-}
-
 function unwrapRequirement(wrapper) {
   if (!wrapper) return null;
 
@@ -790,8 +778,7 @@ function normalizeOrgLevel(orgLevel) {
 }
 
 function extractOrgLevel(personWrapper) {
-  const person =
-    unwrapPersonLike(personWrapper);
+  const person = unwrapPerson(personWrapper);
 
   if (!person) {
     return null;
@@ -808,8 +795,7 @@ function extractOrgLevel(personWrapper) {
 }
 
 function extractOrgLevelName(personWrapper) {
-  const person =
-    unwrapPersonLike(personWrapper);
+  const person = unwrapPerson(personWrapper);
 
   if (!person) {
     return null;
@@ -1365,8 +1351,29 @@ async function enrichOptimizationResultsWithPersonData(
   for (const resourceId of uniqueResourceIds) {
     try {
       /*
-       * UnifiedPerson koristimo za PersonContractor UDF
-       * i orgLevel koji vidi FSM UnifiedPerson DTO.
+       * Person koristimo za orgLevel.
+       */
+      const personResponse =
+        await getPerson(
+          resourceId,
+          token
+        );
+
+      const personWrapper =
+        getFirstItem(personResponse);
+
+      const orgLevel =
+        extractOrgLevel(
+          personWrapper
+        );
+
+      const orgLevelName =
+        extractOrgLevelName(
+          personWrapper
+        );
+
+      /*
+       * UnifiedPerson koristimo za PersonContractor UDF.
        */
       const unifiedPersonResponse =
         await getUnifiedPerson(
@@ -1386,16 +1393,6 @@ async function enrichOptimizationResultsWithPersonData(
       const unifiedPersonWrapper =
         getFirstItem(
           unifiedPersonResponse
-        );
-
-      const orgLevel =
-        extractOrgLevel(
-          unifiedPersonWrapper
-        );
-
-      const orgLevelName =
-        extractOrgLevelName(
-          unifiedPersonWrapper
         );
 
       const contractor =
@@ -1423,7 +1420,7 @@ async function enrichOptimizationResultsWithPersonData(
       );
     } catch (error) {
       console.error(
-        "Failed to load UnifiedPerson for resource:",
+        "Failed to load Person/UnifiedPerson for resource:",
         resourceId,
         error.response?.data ||
           error.message
