@@ -785,9 +785,9 @@ function extractOrgLevel(personWrapper) {
   }
 
   const rawOrgLevel =
-    person.orgLevelIds?.[0] ||
     person.orgLevel ||
     person.orgLevelId ||
+    person.orgLevelIds?.[0] ||
     person.orgLevels?.[0] ||
     person.organizationLevel ||
     person.organizationLevelId ||
@@ -1533,6 +1533,28 @@ function selectContractorBySequence(
     };
   }
 
+  const allowedContractors =
+    Object.keys(matrix);
+
+  const allowedContractorSet =
+    new Set(allowedContractors);
+
+  const matrixEligibleContractors =
+    availableContractors.filter(
+      (contractor) =>
+        allowedContractorSet.has(
+          contractor
+        )
+    );
+
+  const rejectedByMatrixContractors =
+    availableContractors.filter(
+      (contractor) =>
+        !allowedContractorSet.has(
+          contractor
+        )
+    );
+
   const counterBefore =
     allocationCounters[matrixKey] ||
     0;
@@ -1549,7 +1571,7 @@ function selectContractorBySequence(
   let reason = null;
 
   if (
-    availableContractors.includes(
+    matrixEligibleContractors.includes(
       preferredContractor
     )
   ) {
@@ -1559,20 +1581,24 @@ function selectContractorBySequence(
     reason =
       "QUOTA_SEQUENCE";
   } else if (
-    availableContractors.length > 0
+    matrixEligibleContractors.length > 0
   ) {
     /*
      * Ako preferirani contractor trenutno nema
      * validnog resursa, biramo dostupnog contractor-a
-     * sa najboljim rezultatom.
+     * sa najboljim rezultatom, ali samo ako je
+     * dozvoljen matricom za ovaj key.
      */
     selectedContractor =
-      availableContractors[0];
+      matrixEligibleContractors[0];
 
     fallbackUsed = true;
 
     reason =
       "QUOTA_FALLBACK_PREFERRED_CONTRACTOR_UNAVAILABLE";
+  } else {
+    reason =
+      "NO_MATRIX_ELIGIBLE_CONTRACTOR_AVAILABLE";
   }
 
   /*
@@ -1589,6 +1615,9 @@ function selectContractorBySequence(
     fallbackUsed,
     reason,
     weights: matrix,
+    allowedContractors,
+    matrixEligibleContractors,
+    rejectedByMatrixContractors,
     counterBefore,
     counterAfter:
       allocationCounters[matrixKey] ??
@@ -2054,6 +2083,10 @@ app.post(
           mandatorySkillsUsed:
             mandatorySkills,
           availableContractors,
+          matrixEligibleContractors:
+            allocation.matrixEligibleContractors,
+          rejectedByMatrixContractors:
+            allocation.rejectedByMatrixContractors,
           allocation
         });
       }
@@ -2130,7 +2163,12 @@ app.post(
             allocation.counterBefore,
           counterAfter:
             allocation.counterAfter,
-          availableContractors
+          availableContractors:
+            allocation.matrixEligibleContractors,
+          allAvailableContractors:
+            availableContractors,
+          rejectedByMatrixContractors:
+            allocation.rejectedByMatrixContractors
         },
 
         generatedSlotsCount:
