@@ -6,6 +6,7 @@ const { DateTime } = require("luxon");
 require("dotenv").config();
 
 const app = express();
+app.set("trust proxy", true);
 app.use(express.json({ limit: "10mb" }));
 
 const {
@@ -1726,6 +1727,25 @@ app.post(
     try {
       console.log(
         "Received request from FSM."
+      );
+
+      console.log(
+        "Incoming request network:",
+        {
+          ip: request.ip,
+          remoteAddress:
+            request.socket?.remoteAddress,
+          xForwardedFor:
+            request.headers[
+              "x-forwarded-for"
+            ],
+          forwarded:
+            request.headers.forwarded,
+          userAgent:
+            request.headers[
+              "user-agent"
+            ]
+        }
       );
 
       console.log(
