@@ -1168,7 +1168,7 @@ function buildOptimizationPayload(
       requestBody.resources || {
         filters: {
           includeInternalPersons: true,
-          includeCrowdPersons: false,
+          includeCrowdPersons: true,
           includeMandatorySkills:
             mandatorySkills.length > 0
         }
