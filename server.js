@@ -1263,6 +1263,76 @@ function normalizeOptimizationResult(result) {
   };
 }
 
+function buildManualDispatchResponse({
+  reason,
+  serviceCallId = null,
+  matrixKey = null,
+  mandatorySkills = [],
+  generatedSlotsCount = 0,
+  details = null
+}) {
+  const sequence =
+    matrixKey
+      ? CONTRACTOR_ALLOCATION_SEQUENCES[
+          matrixKey
+        ]
+      : null;
+
+  const counter =
+    matrixKey
+      ? allocationCounters[matrixKey] || 0
+      : 0;
+
+  return {
+    results: [
+      {
+        slot: null,
+        resource: null,
+        start: null,
+        end: null,
+        trip: null,
+        score: null,
+        orgLevel: null,
+        orgLevelName: null,
+        contractor: null,
+        requiredSkills: mandatorySkills,
+        selectionReason:
+          `MANUAL_DISPATCH_${reason}`,
+        manualDispatchRequired: true
+      }
+    ],
+    alternatives: [],
+    allocation: {
+      matrixKey,
+      enrichmentFallbackUsed: false,
+      weights:
+        matrixKey
+          ? CONTRACTOR_ALLOCATION_MATRIX[
+              matrixKey
+            ] || null
+          : null,
+      sequencePosition: null,
+      sequenceLength:
+        sequence?.length || null,
+      preferredContractor: null,
+      selectedContractor: null,
+      fallbackUsed: true,
+      counterBefore: counter,
+      counterAfter: counter,
+      availableContractors: [],
+      allAvailableContractors: [],
+      rejectedByMatrixContractors: []
+    },
+    manualDispatchRequired: true,
+    fallbackReason: reason,
+    serviceCallId,
+    matrixKey,
+    mandatorySkillsUsed: mandatorySkills,
+    generatedSlotsCount,
+    fallbackDetails: details
+  };
+}
+
 function summarizeResultsByResource(results) {
   const summary = new Map();
 
@@ -1450,10 +1520,12 @@ function groupResultsByContractor(enrichedResults) {
   const grouped = {};
 
   for (const result of enrichedResults) {
-    if (
-      !result.contractor ||
-      !result.orgLevel
-    ) {
+    /*
+     * orgLevel je dodatni podatak za Activity, ali ne sme
+     * da blokira izbor resursa i termina. Za alokaciju po
+     * contractor-u dovoljan je PersonContractor.
+     */
+    if (!result.contractor) {
       continue;
     }
 
@@ -1761,10 +1833,12 @@ app.post(
         request.body?.serviceCallId;
 
       if (!serviceCallId) {
-        return response.status(400).json({
-          error:
-            "serviceCallId is required"
-        });
+        return response.json(
+          buildManualDispatchResponse({
+            reason:
+              "SERVICE_CALL_ID_MISSING"
+          })
+        );
       }
 
       const token =
@@ -1787,11 +1861,13 @@ app.post(
         );
 
       if (!serviceCall) {
-        return response.status(400).json({
-          error:
-            "ServiceCall not found",
-          serviceCallId
-        });
+        return response.json(
+          buildManualDispatchResponse({
+            reason:
+              "SERVICE_CALL_NOT_FOUND",
+            serviceCallId
+          })
+        );
       }
 
       const requirementLookup =
@@ -1813,17 +1889,21 @@ app.post(
       if (
         mandatorySkills.length === 0
       ) {
-        return response.status(400).json({
-          error:
-            "No mandatory skills resolved from Requirement and Tag DTO",
-          serviceCallId,
-          requirementQueryUsed:
-            requirementLookup.queryUsed,
-          requirementTagIds:
-            resolvedRequirementSkills.tagIds,
-          tagLookups:
-            resolvedRequirementSkills.tagLookups
-        });
+        return response.json(
+          buildManualDispatchResponse({
+            reason:
+              "MANDATORY_SKILLS_UNAVAILABLE",
+            serviceCallId,
+            details: {
+              requirementQueryUsed:
+                requirementLookup.queryUsed,
+              requirementTagIds:
+                resolvedRequirementSkills.tagIds,
+              tagLookups:
+                resolvedRequirementSkills.tagLookups
+            }
+          })
+        );
       }
 
       const matrixKey =
@@ -1841,12 +1921,15 @@ app.post(
           matrixKey
         ]
       ) {
-        return response.status(400).json({
-          error:
-            "Contractor allocation matrix is not configured for this skill combination",
-          matrixKey,
-          mandatorySkills
-        });
+        return response.json(
+          buildManualDispatchResponse({
+            reason:
+              "ALLOCATION_MATRIX_NOT_CONFIGURED",
+            serviceCallId,
+            matrixKey,
+            mandatorySkills
+          })
+        );
       }
 
       const optimizationPayload =
@@ -1969,19 +2052,35 @@ app.post(
       if (
         validResults.length === 0
       ) {
-        return response.status(400).json({
-          error:
-            "No valid optimization results completely inside their slots",
-          matrixKey,
-          mandatorySkillsUsed:
+        const manualDispatchResponse =
+          buildManualDispatchResponse({
+            reason:
+              "NO_VALID_OPTIMIZATION_RESULT",
+            serviceCallId,
+            matrixKey,
             mandatorySkills,
-          generatedSlotsCount:
-            optimizationPayload
-              .slots.length,
-          allResourceDistribution,
-          validResourceDistribution,
-          scoreData
-        });
+            generatedSlotsCount:
+              optimizationPayload
+                .slots.length,
+            details: {
+              allResourceDistribution,
+              validResourceDistribution,
+              scoreData
+            }
+          });
+
+        console.log(
+          "Returning manual-dispatch Activity response:",
+          JSON.stringify(
+            manualDispatchResponse,
+            null,
+            2
+          )
+        );
+
+        return response.json(
+          manualDispatchResponse
+        );
       }
 
       const enrichedResults =
@@ -2040,90 +2139,93 @@ app.post(
       if (
         availableContractors.length === 0
       ) {
-        return response.status(400).json({
-          error:
-            "Optimization returned resources, but no resource has both PersonContractor and orgLevel",
-          matrixKey,
-          mandatorySkillsUsed:
-            mandatorySkills,
-          resources:
-            [
-              ...new Map(
-                enrichedResults.map(
-                  (result) => [
-                    result.resource,
-                    {
-                      resource:
-                        result.resource,
-                      contractor:
-                        result.contractor,
-                      orgLevel:
-                        result.orgLevel
-                    }
-                  ]
-                )
-              ).values()
-            ],
-          hint:
-            "PersonContractor must exist on UnifiedPerson.13 in the configured UDF meta ID."
-        });
+        console.log(
+          "No contractor data available; Activity response will use the best Optimization result."
+        );
       }
 
-      const allocation =
+      let allocation =
         selectContractorBySequence(
           matrixKey,
           availableContractors
         );
 
-      if (
-        allocation.reason ===
-        "MATRIX_NOT_CONFIGURED"
-      ) {
-        return response.status(400).json({
-          error:
-            "Contractor allocation sequence is not configured",
-          matrixKey,
-          mandatorySkillsUsed:
-            mandatorySkills,
-          availableContractors
+      let selectedContractorResults =
+        allocation.selectedContractor
+          ? groupedByContractor[
+              allocation.selectedContractor
+            ] || []
+          : [];
+
+      let bestResult =
+        selectedContractorResults[0] ||
+        null;
+
+      let enrichmentFallbackUsed = false;
+
+      /*
+       * Ako enrichment nije vratio contractor/orgLevel ili
+       * contractor nije dozvoljen matricom, ipak vraćamo
+       * najbolji validan Optimization rezultat. Downstream
+       * tada dobija results[0] i može da kreira Activity sa
+       * dostupnim resource/start/end podacima.
+       */
+      if (!bestResult) {
+        enrichmentFallbackUsed = true;
+
+        selectedContractorResults = [
+          ...enrichedResults
+        ].sort((first, second) => {
+          const firstScore =
+            Number(first.score) || 0;
+
+          const secondScore =
+            Number(second.score) || 0;
+
+          if (
+            secondScore !== firstScore
+          ) {
+            return (
+              secondScore - firstScore
+            );
+          }
+
+          return (
+            new Date(first.start).getTime() -
+            new Date(second.start).getTime()
+          );
         });
+
+        bestResult =
+          selectedContractorResults[0] ||
+          null;
+
+        allocation = {
+          ...allocation,
+          selectedContractor:
+            bestResult?.contractor || null,
+          fallbackUsed: true,
+          reason:
+            "ENRICHMENT_FALLBACK_BEST_OPTIMIZATION_RESULT"
+        };
       }
-
-      if (
-        !allocation.selectedContractor
-      ) {
-        return response.status(400).json({
-          error:
-            "No contractor could be selected",
-          matrixKey,
-          mandatorySkillsUsed:
-            mandatorySkills,
-          availableContractors,
-          matrixEligibleContractors:
-            allocation.matrixEligibleContractors,
-          rejectedByMatrixContractors:
-            allocation.rejectedByMatrixContractors,
-          allocation
-        });
-      }
-
-      const selectedContractorResults =
-        groupedByContractor[
-          allocation.selectedContractor
-        ] || [];
-
-      const bestResult =
-        selectedContractorResults[0];
 
       if (!bestResult) {
-        return response.status(400).json({
-          error:
-            "Selected contractor has no valid optimization result",
-          selectedContractor:
-            allocation.selectedContractor,
-          matrixKey,
-          allocation
-        });
+        return response.json(
+          buildManualDispatchResponse({
+            reason:
+              "OPTIMIZATION_RESULT_UNAVAILABLE_AFTER_ENRICHMENT",
+            serviceCallId,
+            matrixKey,
+            mandatorySkills,
+            generatedSlotsCount:
+              optimizationPayload
+                .slots.length,
+            details: {
+              allocation
+            }
+          })
+        );
       }
 
       const alternatives =
@@ -2163,6 +2265,7 @@ app.post(
 
         allocation: {
           matrixKey,
+          enrichmentFallbackUsed,
           weights:
             allocation.weights,
           sequencePosition:
@@ -2250,25 +2353,21 @@ app.post(
         );
       }
 
-      const responseStatus =
-        error.response?.status &&
-        error.response.status >= 400 &&
-        error.response.status < 500
-          ? error.response.status
-          : 500;
-
-      return response.status(responseStatus).json({
-        error:
-          "Wrapper endpoint failed",
-        message:
-          error.message,
-        upstreamStatus:
-          error.response?.status ||
-          null,
-        response:
-          error.response?.data ||
-          null
-      });
+      return response.json(
+        buildManualDispatchResponse({
+          reason:
+            "WRAPPER_OR_UPSTREAM_ERROR",
+          serviceCallId:
+            request.body?.serviceCallId ||
+            null,
+          details: {
+            message: error.message,
+            upstreamStatus:
+              error.response?.status ||
+              null
+          }
+        })
+      );
     }
   }
 );
