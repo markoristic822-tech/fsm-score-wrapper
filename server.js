@@ -5,6 +5,7 @@ const path = require("path");
 const { DateTime } = require("luxon");
 const { resolveAllocationRouting } = require("./allocation-routing");
 const { BusinessPartnerAssignment } = require("./business-partner-assignment");
+const { ServiceCallTechnology } = require("./service-call-technology");
 require("dotenv").config();
 
 const app = express();
@@ -89,6 +90,13 @@ const businessPartnerAssignment = new BusinessPartnerAssignment({
 });
 
 validateEnvironment();
+
+const serviceCallTechnology = new ServiceCallTechnology(async (token) => {
+  const url = dataApiUrl("UdfMeta", "UdfMeta.18", 'externalId="DIS_SC_TECHNOLOGY"') + "&pageSize=2";
+  const response = await axios.get(url, { headers: fsmHeaders(token) });
+  if (!Array.isArray(response.data?.data)) throw new Error("Invalid technology UdfMeta response");
+  return response.data.data.map((row) => row.udfMeta || row);
+});
 
 function loadAllocationConfig(configPath) {
   if (!fs.existsSync(configPath)) {
@@ -1575,7 +1583,16 @@ app.post(
         );
       }
 
-      const routing = resolveAllocationRouting(mandatorySkills, serviceCall, allocationConfig.skillColumnMap);
+      let technology;
+      try {
+        technology = await serviceCallTechnology.read(serviceCall, token);
+      } catch (error) {
+        return response.json(buildManualDispatchResponse({
+          reason: "SERVICE_CALL_TECHNOLOGY_LOOKUP_FAILED", serviceCallId, mandatorySkills,
+          details: { message: error.message }
+        }));
+      }
+      const routing = resolveAllocationRouting(mandatorySkills, serviceCall, allocationConfig.skillColumnMap, technology);
       const matrixKey = routing.matrixKey;
 
       console.log("Contractor allocation routing:", {

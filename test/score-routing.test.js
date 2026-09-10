@@ -23,8 +23,12 @@ async function score(externalId, skills, options = {}) {
   const localRequire = createRequire(path.join(root, "server.js"));
   const axios = {
     async get(url) {
+      if (url.includes('/UdfMeta?')) {
+        if (options.metadataError) throw new Error("Metadata unavailable");
+        return { data: { data: [{ udfMeta: { id: "technology-meta", externalId: "DIS_SC_TECHNOLOGY" } }] } };
+      }
       assert.ok(url.includes('/BusinessPartner?'));
-      return { data: { data: [{ businessPartner: { id: 'bp-1', name: 'DIMOU_L_DIS' } }] } };
+      return { data: { data: [{ businessPartner: { id: 'bp-1', name: options.businessPartnerName || 'DIMOU_L_DIS' } }] } };
     },
     async patch(url, payload) {
       assert.ok(url.includes('/ServiceCall/sc-1?'));
@@ -57,12 +61,12 @@ async function score(externalId, skills, options = {}) {
     __dirname: root,
     console: { log() {}, error() {} },
     process: { env, on() {}, exit() { throw new Error("Unexpected exit"); } },
-    fixture: { externalId, skills, contractor: options.contractor || "DIMOU_L_DIS" }
+    fixture: { externalId, skills, contractor: options.contractor || "DIMOU_L_DIS", udfValues: options.udfValues || [] }
   });
   vm.runInContext(fs.readFileSync(path.join(root, "server.js"), "utf8"), context);
   vm.runInContext(`
     getFsmToken = async () => "test-token";
-    getServiceCall = async () => ({ id: "sc-1", externalId: fixture.externalId, lastChanged: 123 });
+    getServiceCall = async () => ({ id: "sc-1", externalId: fixture.externalId, lastChanged: 123, udfValues: fixture.udfValues });
     getFirstItem = (value) => value;
     unwrapServiceCall = (value) => value;
     getRequirementsForServiceCall = async () => ({ response: {}, queryUsed: "test" });
@@ -125,4 +129,23 @@ test("a resource from a different subcontractor cannot replace the matrix assign
   assert.equal(result.fallbackReason, "NO_RESOURCE_FOR_SELECTED_SUBCONTRACTOR");
   assert.equal(result.fallbackDetails.assignment.selectedContractor, "DIMOU_L_DIS");
   assert.equal(result.results[0].resource, null);
+});
+
+test("FTTH technology with MESH process selects SAT PRAXIS through the real route", async () => {
+  const { result, optimizationRequests } = await score("PS11982837", ["MESH", "FTTH", "10443"], {
+    udfValues: [{ meta: "technology-meta", value: "FTTH-GPON" }],
+    businessPartnerName: "SAT_PRAXIS_DIS", contractor: "SAT_PRAXIS_DIS"
+  });
+  assert.equal(result.allocation.matrixKey, "10443|FTTH");
+  assert.equal(result.businessPartnerAssignment.businessPartner.name, "SAT_PRAXIS_DIS");
+  assert.deepEqual(optimizationRequests[0].job.mandatorySkills, ["MESH", "FTTH", "10443"]);
+});
+
+test("failed technology lookup does not assign a BP using a fallback row", async () => {
+  const { result, bpUpdates, optimizationRequests } = await score("PS11982837", ["MESH", "FTTH", "10443"], {
+    udfValues: [{ meta: "technology-meta", value: "FTTH-GPON" }], metadataError: true
+  });
+  assert.equal(result.fallbackReason, "SERVICE_CALL_TECHNOLOGY_LOOKUP_FAILED");
+  assert.equal(bpUpdates.length, 0);
+  assert.equal(optimizationRequests.length, 0);
 });

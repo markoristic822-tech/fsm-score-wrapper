@@ -13,11 +13,17 @@ node scripts/generate-allocation-matrix.js matrix.xlsx allocation-matrix.json "A
 
 ## Selection
 
-- Technology requirements select the postal code + technology column. Inbound
+- The Service Call UDF `DIS_SC_TECHNOLOGY` (from SOAP `technicalInfo.technology`)
+  takes precedence when it contains one recognized technology keyword. For
+  example, `FTTH-GPON` with MESH and FTTH requirements at `10443` selects
+  `10443|FTTH` and `SAT_PRAXIS_DIS`. Conflicting technology keywords return manual
+  dispatch; a metadata lookup failure is not silently ignored. The keyword uses
+  token boundaries, so `FTTH-GPON` matches FTTH, but `NOTFTTH` does not.
+- If technology is empty or unrecognized, requirements select the postal code + technology column. Inbound
   `DTH` maps to `Subcontractor DTH/SBB`; `CLOUD&SYZEFIXIS` maps to
   `CLOUD & SYZEFXIS`. Multiple technology requirements retain the combined-key
   behavior; there is no implicit priority between them.
-- Without a technology keyword, `PS...` uses `INITIATOR (PASPORT)` and `TAS...`
+- Without a technology keyword in either the technology UDF or requirements, `PS...` uses `INITIATOR (PASPORT)` and `TAS...`
   uses `INITIATOR (REMEDY)`. A five-digit postal requirement is still needed.
 - Percentages now allocate **SUB_CONTRACTOR** values directly, rather than grouping
   them under the parent CONTRACTORS name. For `19442` and `TAS...`, the selection
@@ -46,6 +52,8 @@ The API client needs permission to read BusinessPartner and update ServiceCall.
 
 Org Level is no longer looked up or used. Its legacy response fields remain null.
 Optimization still applies the original required skills and availability rules.
+Technology precedence changes only the matrix column; it does not remove other
+required skills such as MESH from Optimization or from the Service Call.
 The resource's `PersonContractor` UDF must resolve to the selected SUB_CONTRACTOR
 code. Without a matching resource, the wrapper returns manual dispatch instead of
 assigning a technician from a different subcontractor.
