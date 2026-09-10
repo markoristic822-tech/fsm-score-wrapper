@@ -4,6 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const { DateTime } = require("luxon");
 const { resolveAllocationRouting } = require("./allocation-routing");
+const { BusinessPartnerAssignment } = require("./business-partner-assignment");
 require("dotenv").config();
 
 const app = express();
@@ -74,6 +75,18 @@ const CONTRACTOR_ALLOCATION_SEQUENCES =
  * Za produkciju ćemo ih kasnije prebaciti u bazu.
  */
 const allocationCounters = {};
+
+const businessPartnerAssignment = new BusinessPartnerAssignment({
+  matrix: CONTRACTOR_ALLOCATION_MATRIX,
+  sequences: CONTRACTOR_ALLOCATION_SEQUENCES,
+  counters: allocationCounters,
+  client: axios,
+  baseUrl: FSM_BASE_URL,
+  headers: fsmHeaders,
+  getServiceCall: async (id, token) => unwrapServiceCall(getFirstItem(await getServiceCall(id, token))),
+  serviceCallDto: FSM_SERVICE_CALL_DTO,
+  businessPartnerDto: process.env.FSM_BUSINESS_PARTNER_DTO || "BusinessPartner.22"
+});
 
 validateEnvironment();
 
@@ -351,52 +364,6 @@ async function getUnifiedPerson(resourceId, token) {
   });
 
   return response.data;
-}
-
-async function getOrgLevelName(orgLevelId, token) {
-  const orgLevelUuid = fsmIdToUuid(orgLevelId);
-
-  if (!orgLevelUuid) {
-    console.log(
-      "OrgLevel ID cannot be converted to UUID:",
-      orgLevelId
-    );
-
-    return null;
-  }
-
-  try {
-    console.log(
-      "Getting OrgLevel name:",
-      orgLevelUuid
-    );
-
-    const response = await axios.get(
-      fsmServiceUrl(
-        `/cloud-org-level-service/api/v1/levels/${orgLevelUuid}`
-      ),
-      {
-        headers: fsmHeaders(token)
-      }
-    );
-
-    const name =
-      response.data?.level?.name;
-
-    return typeof name === "string" &&
-      name.trim()
-      ? name
-      : null;
-  } catch (error) {
-    console.error(
-      "Failed to load OrgLevel name:",
-      orgLevelId,
-      error.response?.data ||
-        error.message
-    );
-
-    return null;
-  }
 }
 
 async function getRequirementsForServiceCall(serviceCallId, token) {
@@ -685,10 +652,8 @@ function normalizeContractorCode(value) {
       .replace(/\s+/g, "_")
       .replace(/-/g, "_");
 
-    aliases[normalizedName] =
-      normalizedCode;
-    aliases[normalizedCode] =
-      normalizedCode;
+    aliases[normalizedName] = code;
+    aliases[normalizedCode] = code;
   }
 
   return aliases[normalized] || normalized;
@@ -768,42 +733,6 @@ function extractPersonContractor(unifiedPersonWrapper) {
   }
 
   return null;
-}
-
-function normalizeOrgLevel(orgLevel) {
-  if (!orgLevel) {
-    return null;
-  }
-
-  if (typeof orgLevel === "string") {
-    return orgLevel;
-  }
-
-  if (typeof orgLevel === "object") {
-    return (
-      orgLevel.id ||
-      orgLevel.objectId ||
-      orgLevel.externalId ||
-      null
-    );
-  }
-
-  return null;
-}
-
-function extractOrgLevel(personWrapper) {
-  const person =
-    unwrapPersonLike(personWrapper);
-
-  if (!person) {
-    return null;
-  }
-
-  const rawOrgLevel =
-    person.orgLevel ||
-    null;
-
-  return normalizeOrgLevel(rawOrgLevel);
 }
 
 function extractDurationFromServiceCall(serviceCall) {
@@ -1283,7 +1212,9 @@ function buildManualDispatchResponse({
         score: null,
         orgLevel: null,
         orgLevelName: null,
-        contractor: null,
+        contractor: details?.assignment?.selectedContractor || null,
+        actSubContractorName: details?.assignment?.businessPartner?.name || null,
+        businessPartner: details?.assignment?.businessPartner?.id || null,
         requiredSkills: mandatorySkills,
         selectionReason:
           `MANUAL_DISPATCH_${reason}`,
@@ -1304,7 +1235,7 @@ function buildManualDispatchResponse({
       sequenceLength:
         sequence?.length || null,
       preferredContractor: null,
-      selectedContractor: null,
+      selectedContractor: details?.assignment?.selectedContractor || null,
       fallbackUsed: true,
       counterBefore: counter,
       counterAfter: counter,
@@ -1312,6 +1243,7 @@ function buildManualDispatchResponse({
       allAvailableContractors: [],
       rejectedByMatrixContractors: []
     },
+    businessPartnerAssignment: details?.assignment || null,
     manualDispatchRequired: true,
     fallbackReason: reason,
     serviceCallId,
@@ -1367,142 +1299,21 @@ function summarizeResultsByResource(results) {
   );
 }
 
-async function enrichOptimizationResultsWithPersonData(
-  validResults,
-  token
-) {
-  const uniqueResourceIds = [
-    ...new Set(
-      validResults.map(
-        (result) => result.resource
-      )
-    )
-  ];
-
-  console.log(
-    "Unique resources returned by Optimization:",
-    uniqueResourceIds
-  );
-
-  const personDataCache = new Map();
-
-  for (const resourceId of uniqueResourceIds) {
+async function enrichOptimizationResultsWithPersonData(validResults, token) {
+  const contractors = new Map();
+  for (const resourceId of new Set(validResults.map((result) => result.resource))) {
     try {
-      /*
-       * UnifiedPerson koristimo za orgLevel i
-       * PersonContractor UDF.
-       */
-      const unifiedPersonResponse =
-        await getUnifiedPerson(
-          resourceId,
-          token
-        );
-
-      console.log(
-        "UnifiedPerson response for contractor lookup:",
-        JSON.stringify(
-          unifiedPersonResponse,
-          null,
-          2
-        )
-      );
-
-      const unifiedPersonWrapper =
-        getFirstItem(
-          unifiedPersonResponse
-        );
-
-      const orgLevel =
-        extractOrgLevel(
-          unifiedPersonWrapper
-        );
-
-      const contractor =
-        extractPersonContractor(
-          unifiedPersonWrapper
-        );
-
-      personDataCache.set(
-        resourceId,
-        {
-          orgLevel,
-          contractor
-        }
-      );
-
-      console.log(
-        "Resource contractor mapping:",
-        {
-          resourceId,
-          contractor,
-          orgLevel
-        }
-      );
+      const person = getFirstItem(await getUnifiedPerson(resourceId, token));
+      contractors.set(resourceId, extractPersonContractor(person));
     } catch (error) {
-      console.error(
-        "Failed to load Person/UnifiedPerson for resource:",
-        resourceId,
-        error.response?.data ||
-          error.message
-      );
-
-      personDataCache.set(
-        resourceId,
-        {
-          orgLevel: null,
-          contractor: null
-        }
-      );
+      console.error("Failed to load UnifiedPerson contractor:", { resourceId, message: error.message });
+      contractors.set(resourceId, null);
     }
+    console.log("Resource contractor mapping:", { resourceId, contractor: contractors.get(resourceId) });
   }
-
-  const orgLevelNameCache = new Map();
-  const uniqueOrgLevelIds = [
-    ...new Set(
-      [...personDataCache.values()]
-        .map(
-          (personData) =>
-            personData.orgLevel
-        )
-        .filter(Boolean)
-    )
-  ];
-
-  for (const orgLevelId of uniqueOrgLevelIds) {
-    const orgLevelName =
-      await getOrgLevelName(
-        orgLevelId,
-        token
-      );
-
-    orgLevelNameCache.set(
-      orgLevelId,
-      orgLevelName
-    );
-  }
-
-  return validResults.map((result) => {
-    const personData =
-      personDataCache.get(
-        result.resource
-      ) || {};
-
-    const orgLevel =
-      personData.orgLevel ||
-      null;
-
-    return {
-      ...result,
-      orgLevel,
-      orgLevelName:
-        orgLevelNameCache.get(
-          orgLevel
-        ) ?? null,
-      contractor:
-        personData.contractor ||
-        null
-    };
-  });
+  return validResults.map((result) => ({
+    ...result, contractor: contractors.get(result.resource), orgLevel: null, orgLevelName: null
+  }));
 }
 
 function groupResultsByContractor(enrichedResults) {
@@ -1510,9 +1321,8 @@ function groupResultsByContractor(enrichedResults) {
 
   for (const result of enrichedResults) {
     /*
-     * orgLevel je dodatni podatak za Activity, ali ne sme
-     * da blokira izbor resursa i termina. Za alokaciju po
-     * contractor-u dovoljan je PersonContractor.
+     * PersonContractor identifies the subcontractor's resources independently
+     * of Org Level. It must match the SUB_CONTRACTOR code in the matrix.
      */
     if (!result.contractor) {
       continue;
@@ -1562,136 +1372,6 @@ function groupResultsByContractor(enrichedResults) {
   return grouped;
 }
 
-function selectContractorBySequence(
-  matrixKey,
-  availableContractors
-) {
-  const matrix =
-    CONTRACTOR_ALLOCATION_MATRIX[
-      matrixKey
-    ];
-
-  const sequence =
-    CONTRACTOR_ALLOCATION_SEQUENCES[
-      matrixKey
-    ];
-
-  if (!matrix || !sequence) {
-    return {
-      selectedContractor: null,
-      preferredContractor: null,
-      fallbackUsed: false,
-      reason: "MATRIX_NOT_CONFIGURED",
-      weights: matrix || null,
-      counterBefore: null,
-      counterAfter: null,
-      sequencePosition: null,
-      sequenceLength:
-        sequence?.length || null
-    };
-  }
-
-  const allowedContractors =
-    Object.keys(matrix);
-
-  const allowedContractorSet =
-    new Set(allowedContractors);
-
-  const matrixEligibleContractors =
-    availableContractors.filter(
-      (contractor) =>
-        allowedContractorSet.has(
-          contractor
-        )
-    );
-
-  const rejectedByMatrixContractors =
-    availableContractors.filter(
-      (contractor) =>
-        !allowedContractorSet.has(
-          contractor
-        )
-    );
-
-  const counterBefore =
-    allocationCounters[matrixKey] ||
-    0;
-
-  const sequencePosition =
-    counterBefore %
-    sequence.length;
-
-  const preferredContractor =
-    sequence[sequencePosition];
-
-  let selectedContractor = null;
-  let fallbackUsed = false;
-  let reason = null;
-
-  if (
-    matrixEligibleContractors.includes(
-      preferredContractor
-    )
-  ) {
-    selectedContractor =
-      preferredContractor;
-
-    reason =
-      "QUOTA_SEQUENCE";
-  } else if (
-    matrixEligibleContractors.length > 0
-  ) {
-    /*
-     * Ako preferirani contractor trenutno nema
-     * validnog resursa, biramo dostupnog contractor-a
-     * sa najboljim rezultatom, ali samo ako je
-     * dozvoljen matricom za ovaj key.
-     */
-    selectedContractor =
-      matrixEligibleContractors[0];
-
-    fallbackUsed = true;
-
-    reason =
-      "QUOTA_FALLBACK_PREFERRED_CONTRACTOR_UNAVAILABLE";
-  } else {
-    reason =
-      "NO_MATRIX_ELIGIBLE_CONTRACTOR_AVAILABLE";
-  }
-
-  /*
-   * Brojač se povećava samo kada je contractor stvarno izabran.
-   */
-  if (selectedContractor) {
-    allocationCounters[matrixKey] =
-      counterBefore + 1;
-  }
-
-  return {
-    selectedContractor,
-    preferredContractor,
-    fallbackUsed,
-    reason,
-    weights: matrix,
-    allowedContractors,
-    matrixEligibleContractors,
-    rejectedByMatrixContractors,
-    counterBefore,
-    counterAfter:
-      allocationCounters[matrixKey] ??
-      counterBefore,
-    sequencePosition,
-    sequenceLength:
-      sequence.length
-  };
-}
-
-/*
- * Sortira dostupne contractore prema njihovom
- * najboljem Optimization rezultatu.
- *
- * Ovo se koristi samo za fallback.
- */
 function sortAvailableContractors(
   groupedByContractor
 ) {
@@ -1895,7 +1575,7 @@ app.post(
         );
       }
 
-      const routing = resolveAllocationRouting(mandatorySkills, serviceCall);
+      const routing = resolveAllocationRouting(mandatorySkills, serviceCall, allocationConfig.skillColumnMap);
       const matrixKey = routing.matrixKey;
 
       console.log("Contractor allocation routing:", {
@@ -1928,12 +1608,28 @@ app.post(
         return response.json(
           buildManualDispatchResponse({
             reason:
-              "ALLOCATION_MATRIX_NOT_CONFIGURED",
+              allocationConfig.invalidMatrixKeys?.[matrixKey]
+                ? "ALLOCATION_MATRIX_INVALID_WEIGHT"
+                : "ALLOCATION_MATRIX_NOT_CONFIGURED",
             serviceCallId,
             matrixKey,
             mandatorySkills
           })
         );
+      }
+
+      let assignment;
+      try {
+        assignment = await businessPartnerAssignment.assign(serviceCallId, matrixKey, token);
+        console.log("Service Call Business Partner assignment:", { serviceCallId, ...assignment });
+      } catch (error) {
+        console.error("Service Call Business Partner assignment failed:", {
+          serviceCallId, matrixKey, message: error.message
+        });
+        return response.json(buildManualDispatchResponse({
+          reason: error.code || "BUSINESS_PARTNER_ASSIGNMENT_FAILED",
+          serviceCallId, matrixKey, mandatorySkills, details: { message: error.message }
+        }));
       }
 
       const optimizationPayload =
@@ -2067,6 +1763,7 @@ app.post(
               optimizationPayload
                 .slots.length,
             details: {
+              assignment,
               allResourceDistribution,
               validResourceDistribution,
               scoreData
@@ -2093,143 +1790,23 @@ app.post(
           token
         );
 
-      const resourcesWithoutContractor =
-        [
-          ...new Map(
-            enrichedResults
-              .filter(
-                (result) =>
-                  !result.contractor
-              )
-              .map((result) => [
-                result.resource,
-                {
-                  resource:
-                    result.resource,
-                  contractor:
-                    result.contractor,
-                  orgLevel:
-                    result.orgLevel
-                }
-              ])
-          ).values()
-        ];
-
-      if (
-        resourcesWithoutContractor.length >
-        0
-      ) {
-        console.log(
-          "Resources without PersonContractor:",
-          resourcesWithoutContractor
-        );
-      }
-
-      const groupedByContractor =
-        groupResultsByContractor(
-          enrichedResults
-        );
-
-      const availableContractors =
-        sortAvailableContractors(
-          groupedByContractor
-        );
-
-      console.log(
-        "Available contractors:",
-        availableContractors
-      );
-
-      if (
-        availableContractors.length === 0
-      ) {
-        console.log(
-          "No contractor data available; Activity response will use the best Optimization result."
-        );
-      }
-
-      let allocation =
-        selectContractorBySequence(
-          matrixKey,
-          availableContractors
-        );
-
-      let selectedContractorResults =
-        allocation.selectedContractor
-          ? groupedByContractor[
-              allocation.selectedContractor
-            ] || []
-          : [];
-
-      let bestResult =
-        selectedContractorResults[0] ||
-        null;
-
-      let enrichmentFallbackUsed = false;
-
-      /*
-       * Ako enrichment nije vratio contractor/orgLevel ili
-       * contractor nije dozvoljen matricom, ipak vraćamo
-       * najbolji validan Optimization rezultat. Downstream
-       * tada dobija results[0] i može da kreira Activity sa
-       * dostupnim resource/start/end podacima.
-       */
+      const groupedByContractor = groupResultsByContractor(enrichedResults);
+      const availableContractors = sortAvailableContractors(groupedByContractor);
+      const selectedContractorResults = groupedByContractor[assignment.selectedContractor] || [];
+      const bestResult = selectedContractorResults[0];
+      const enrichmentFallbackUsed = false;
+      const allocation = {
+        ...assignment,
+        matrixEligibleContractors: availableContractors.filter((code) => code === assignment.selectedContractor),
+        rejectedByMatrixContractors: availableContractors.filter((code) => code !== assignment.selectedContractor)
+      };
       if (!bestResult) {
-        enrichmentFallbackUsed = true;
-
-        selectedContractorResults = [
-          ...enrichedResults
-        ].sort((first, second) => {
-          const firstScore =
-            Number(first.score) || 0;
-
-          const secondScore =
-            Number(second.score) || 0;
-
-          if (
-            secondScore !== firstScore
-          ) {
-            return (
-              secondScore - firstScore
-            );
-          }
-
-          return (
-            new Date(first.start).getTime() -
-            new Date(second.start).getTime()
-          );
-        });
-
-        bestResult =
-          selectedContractorResults[0] ||
-          null;
-
-        allocation = {
-          ...allocation,
-          selectedContractor:
-            bestResult?.contractor || null,
-          fallbackUsed: true,
-          reason:
-            "ENRICHMENT_FALLBACK_BEST_OPTIMIZATION_RESULT"
-        };
-      }
-
-      if (!bestResult) {
-        return response.json(
-          buildManualDispatchResponse({
-            reason:
-              "OPTIMIZATION_RESULT_UNAVAILABLE_AFTER_ENRICHMENT",
-            serviceCallId,
-            matrixKey,
-            mandatorySkills,
-            generatedSlotsCount:
-              optimizationPayload
-                .slots.length,
-            details: {
-              allocation
-            }
-          })
-        );
+        return response.json(buildManualDispatchResponse({
+          reason: "NO_RESOURCE_FOR_SELECTED_SUBCONTRACTOR",
+          serviceCallId, matrixKey, mandatorySkills,
+          generatedSlotsCount: optimizationPayload.slots.length,
+          details: { assignment, availableContractors }
+        }));
       }
 
       const alternatives =
@@ -2246,6 +1823,7 @@ app.post(
           }));
 
       const enrichedResponse = {
+        businessPartnerAssignment: assignment,
         results: [
           {
             ...normalizeOptimizationResult(
@@ -2258,6 +1836,8 @@ app.post(
               null,
             contractor:
               bestResult.contractor,
+            actSubContractorName: assignment.businessPartner.name,
+            businessPartner: assignment.businessPartner.id,
             requiredSkills:
               mandatorySkills,
             selectionReason:

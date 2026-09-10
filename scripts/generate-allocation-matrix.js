@@ -1,282 +1,94 @@
-const fs = require("fs");
+﻿const fs = require("fs");
 const path = require("path");
 const XLSX = require("xlsx");
 
-const CONTRACTOR_CODE_MAP = {
-  "SAT PRAXIS LTD": "SAT_PRAXIS",
-  "L.DIMOU-M.DASKALAKI O.E-PATRAS": "DIMOU_DASKALAKI_PATRAS",
-  ICOM: "ICOM",
-  PSP: "PSP",
-  "GOUDELOS KONSTANTINOS": "GOUDELOS",
-  "TECHRETAIL E.E ATHENS": "TECHRETAIL_ATHENS",
-  "TECHRETAIL E.E THESSALONIKI": "TECHRETAIL_THESSALONIKI",
-  "SALONIKA NETWORKS \u039c\u039f\u039d .\u0399.\u039a.\u0395": "SALONIKA_NETWORKS",
-  "L.DIMOU-M.DASKALAKI O.E-CRETE": "DIMOU_DASKALAKI_CRETE",
-  "SEVEN TECH IKE": "SEVEN_TECH",
-  "AMTH TECHNICAL SUPPORT OE": "AMTH_TECHNICAL_SUPPORT",
-  "TEL.PELOP MIKE NS KALAMATAS": "TEL_PELOP_KALAMATAS",
-  "KARALIS D. ANASTASAKIS K OE": "KARALIS_ANASTASAKIS",
-  "TELECOMMUNICATIONS TELEGLOBAL OE": "TELEGLOBAL",
-  "TSOLAKIDIS CHRISTOS": "TSOLAKIDIS",
-  POWERSELL: "POWERSELL",
-  "ELECTRIC CITY": "ELECTRIC_CITY",
-  FIBERGEN: "FIBERGEN",
-  "RODIAKI TELEMATICS S.A.": "RODIAKI_TELEMATICS",
-  EUROAXES: "EUROAXES",
-  KMDTELECOM: "KMDTELECOM"
-};
+const SKILL_COLUMNS = ["INITIATOR (PASPORT)", "INITIATOR (REMEDY)",
+  "FWA", "FTTH", "MESH", "CLOUD & SYZEFXIS", "Subcontractor DTH/SBB"];
+const clean = (value) => String(value ?? "").trim();
+const header = (value) => clean(value).replace(/\s+/g, " ").toUpperCase();
 
-const DEFAULT_INPUT = path.join(__dirname, "..", "matrix.xlsx");
-const DEFAULT_OUTPUT = path.join(
-  __dirname,
-  "..",
-  "allocation-matrix.json"
-);
-
-const inputPath = path.resolve(process.argv[2] || DEFAULT_INPUT);
-const outputPath = path.resolve(process.argv[3] || DEFAULT_OUTPUT);
-
-function normalizeHeader(value) {
-  return String(value || "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function normalizePostalCode(value) {
-  if (value === null || value === undefined || value === "") {
-    return null;
-  }
-
-  return String(value).trim();
-}
-
-function fallbackContractorCode(value) {
-  return String(value || "")
-    .normalize("NFKD")
-    .replace(/[^\w\s-]/g, "")
-    .trim()
-    .toUpperCase()
-    .replace(/\s+/g, "_")
-    .replace(/-+/g, "_")
-    .replace(/_+/g, "_");
-}
-
-function normalizeContractorCode(value) {
-  const name = String(value || "").trim();
-
-  return CONTRACTOR_CODE_MAP[name] || fallbackContractorCode(name);
+function column(headers, name) {
+  const index = headers.findIndex((item) => header(item) === header(name));
+  if (index < 0) throw new Error(`Required column was not found: ${name}`);
+  return index;
 }
 
 function parseWeight(value) {
-  if (
-    value === null ||
-    value === undefined ||
-    value === "" ||
-    value === false
-  ) {
-    return 0;
-  }
-
-  const numericValue = Number(value);
-
-  if (!Number.isFinite(numericValue)) {
-    return 100;
-  }
-
-  if (numericValue <= 0) {
-    return 0;
-  }
-
-  return numericValue <= 1
-    ? numericValue * 100
-    : numericValue;
+  if (value == null || clean(value) === "") return 0;
+  const text = clean(value);
+  const percent = text.endsWith("%");
+  const number = Number(percent ? text.slice(0, -1).trim() : value);
+  if (!Number.isFinite(number) || number < 0 || typeof value === "boolean") return null;
+  return percent || number > 1 ? number : number * 100;
 }
 
-function roundWeight(value) {
-  return Number(value.toFixed(6));
-}
-
-function normalizeWeights(weightsByContractor) {
-  const total = Object.values(weightsByContractor)
-    .reduce((sum, value) => sum + value, 0);
-
-  if (total <= 0) {
-    return weightsByContractor;
+function generateMatrix(book, sourceFile) {
+  const sheetName = book.SheetNames.find((name) => header(name) === "POSTAL CODE FLOW");
+  if (!sheetName) throw new Error("Required POSTAL CODE FLOW sheet was not found");
+  const rows = XLSX.utils.sheet_to_json(book.Sheets[sheetName], { header: 1, defval: null });
+  const headers = rows[0] || [];
+  const postalIndex = column(headers, "POSTAL");
+  const subIndex = column(headers, "SUB_CONTRACTOR");
+  const parentIndex = column(headers, "CONTRACTORS");
+  const skills = SKILL_COLUMNS.map((name) => ({ name, index: column(headers, name) }));
+  const matrix = {};
+  const subcontractors = {};
+  const warnings = [];
+  const invalidMatrixKeys = {};
+  for (let index = 1; index < rows.length; index++) {
+    const row = rows[index];
+    const postalCode = clean(row[postalIndex]);
+    if (!postalCode) continue;
+    if (!/^\d{5}$/.test(postalCode)) throw new Error(`Invalid postal code at row ${index + 1}`);
+    const code = clean(row[subIndex]);
+    if (!code) throw new Error(`SUB_CONTRACTOR is missing at row ${index + 1}`);
+    subcontractors[code] ||= { code, name: code, contractorName: clean(row[parentIndex]) };
+    for (const { name, index: skillIndex } of skills) {
+      const key = `${postalCode}|${name}`;
+      const weight = parseWeight(row[skillIndex]);
+      if (weight === null) {
+        const warning = { type: "INVALID_WEIGHT", row: index + 1, matrixKey: key,
+          subcontractor: code, rawValue: row[skillIndex] };
+        warnings.push(warning);
+        (invalidMatrixKeys[key] ||= []).push(warning);
+        continue;
+      }
+      if (weight <= 0) continue;
+      matrix[key] ||= {};
+      matrix[key][code] = (matrix[key][code] || 0) + weight;
+    }
   }
 
-  if (Math.abs(total - 100) <= 0.0001) {
-    return Object.fromEntries(
-      Object.entries(weightsByContractor)
-        .map(([contractor, weight]) => [
-          contractor,
-          roundWeight(weight)
-        ])
-    );
+  // Invalid cells block their whole key instead of changing the other shares.
+  for (const key of Object.keys(invalidMatrixKeys)) delete matrix[key];
+  for (const [key, weights] of Object.entries(matrix)) {
+    const total = Object.values(weights).reduce((sum, weight) => sum + weight, 0);
+    if (Math.abs(total - 100) > 0.0001) warnings.push({
+      type: "WEIGHTS_TOTAL_NORMALIZED", matrixKey: key, total, rawWeights: { ...weights }
+    });
+    for (const code of Object.keys(weights)) {
+      weights[code] = Number((weights[code] / total * 100).toFixed(6));
+    }
   }
 
-  return Object.fromEntries(
-    Object.entries(weightsByContractor)
-      .map(([contractor, weight]) => [
-        contractor,
-        roundWeight((weight / total) * 100)
-      ])
-  );
+  return {
+    generatedAt: new Date().toISOString(), sourceFile, sheetName: sheetName.trim(),
+    skillColumns: SKILL_COLUMNS,
+    skillColumnMap: { "CLOUD&SYZEFIXIS": "CLOUD & SYZEFXIS", DTH: "Subcontractor DTH/SBB" },
+    contractorCodeMap: Object.fromEntries(Object.keys(subcontractors).map((code) => [code, code])),
+    subcontractors, matrix, invalidMatrixKeys, warnings
+  };
 }
 
 function main() {
-  if (!fs.existsSync(inputPath)) {
-    throw new Error(`Input Excel file not found: ${inputPath}`);
-  }
-
-  const workbook = XLSX.readFile(inputPath, {
-    cellDates: false
-  });
-
-  const sheetName = workbook.SheetNames[0];
-  const worksheet = workbook.Sheets[sheetName];
-  const rows = XLSX.utils.sheet_to_json(worksheet, {
-    header: 1,
-    defval: null
-  });
-
-  if (rows.length < 2) {
-    throw new Error("Matrix sheet does not contain data rows.");
-  }
-
-  const headers = rows[0].map(normalizeHeader);
-  const postalIndex = headers.findIndex(
-    (header) => header.toUpperCase() === "POSTAL"
-  );
-  const contractorIndex = headers.findIndex(
-    (header) => header.toUpperCase() === "CONTRACTORS"
-  );
-
-  if (postalIndex === -1) {
-    throw new Error("POSTAL column was not found.");
-  }
-
-  if (contractorIndex === -1) {
-    throw new Error("CONTRACTORS column was not found.");
-  }
-
-  const skillIndexes = headers
-    .map((header, index) => ({ header, index }))
-    .filter(({ header, index }) =>
-      header &&
-      index > postalIndex &&
-      index < contractorIndex &&
-      !["CITY", "REGION"].includes(header.toUpperCase())
-    );
-
-  const rawMatrix = {};
-  const warnings = [];
-  const unknownContractors = new Set();
-
-  for (let rowIndex = 1; rowIndex < rows.length; rowIndex++) {
-    const row = rows[rowIndex];
-    const postalCode = normalizePostalCode(row[postalIndex]);
-    const contractorName = String(row[contractorIndex] || "").trim();
-
-    if (!postalCode || !contractorName) {
-      continue;
-    }
-
-    const contractorCode =
-      normalizeContractorCode(contractorName);
-
-    if (!CONTRACTOR_CODE_MAP[contractorName]) {
-      unknownContractors.add(contractorName);
-    }
-
-    for (const { header: skillName, index } of skillIndexes) {
-      const rawValue = row[index];
-      const weight = parseWeight(rawValue);
-
-      if (weight <= 0) {
-        continue;
-      }
-
-      if (!Number.isFinite(Number(rawValue))) {
-        warnings.push({
-          type: "NON_NUMERIC_WEIGHT",
-          row: rowIndex + 1,
-          postalCode,
-          skillName,
-          contractorName,
-          contractorCode,
-          rawValue,
-          assumedWeight: 100
-        });
-      }
-
-      const matrixKey = `${postalCode}|${skillName}`;
-
-      rawMatrix[matrixKey] = rawMatrix[matrixKey] || {};
-      rawMatrix[matrixKey][contractorCode] =
-        (rawMatrix[matrixKey][contractorCode] || 0) +
-        weight;
-    }
-  }
-
-  const matrix = {};
-
-  for (const [matrixKey, weights] of Object.entries(rawMatrix)) {
-    const total = Object.values(weights)
-      .reduce((sum, value) => sum + value, 0);
-
-    if (Math.abs(total - 100) > 0.0001) {
-      warnings.push({
-        type: "WEIGHTS_TOTAL_NORMALIZED",
-        matrixKey,
-        total: roundWeight(total),
-        rawWeights: Object.fromEntries(
-          Object.entries(weights)
-            .map(([contractor, weight]) => [
-              contractor,
-              roundWeight(weight)
-            ])
-        )
-      });
-    }
-
-    matrix[matrixKey] = normalizeWeights(weights);
-  }
-
-  for (const contractorName of unknownContractors) {
-    warnings.push({
-      type: "UNKNOWN_CONTRACTOR_CODE_MAP",
-      contractorName,
-      generatedCode: normalizeContractorCode(contractorName)
-    });
-  }
-
-  const output = {
-    generatedAt: new Date().toISOString(),
-    sourceFile: path.basename(inputPath),
-    sheetName,
-    skillColumns: skillIndexes.map(({ header }) => header),
-    contractorCodeMap: CONTRACTOR_CODE_MAP,
-    matrix,
-    warnings
-  };
-
-  fs.writeFileSync(
-    outputPath,
-    `${JSON.stringify(output, null, 2)}\n`,
-    "utf8"
-  );
-
-  console.log(
-    `Generated ${Object.keys(matrix).length} allocation matrix entries.`
-  );
-  console.log(`Output: ${outputPath}`);
-
-  if (warnings.length > 0) {
-    console.log(`Warnings: ${warnings.length}`);
-    for (const warning of warnings.slice(0, 20)) {
-      console.log(JSON.stringify(warning));
-    }
-  }
+  const input = path.resolve(process.argv[2] || path.join(__dirname, "..", "matrix.xlsx"));
+  const output = path.resolve(process.argv[3] || path.join(__dirname, "..", "allocation-matrix.json"));
+  const result = generateMatrix(XLSX.readFile(input), process.argv[4] || path.basename(input));
+  fs.writeFileSync(output, `${JSON.stringify(result, null, 2)}\n`, "utf8");
+  console.log(JSON.stringify({ entries: Object.keys(result.matrix).length,
+    subcontractors: Object.keys(result.subcontractors).length,
+    invalidKeys: Object.keys(result.invalidMatrixKeys), warnings: result.warnings.length }));
 }
 
-main();
+if (require.main === module) main();
+module.exports = { generateMatrix, parseWeight };

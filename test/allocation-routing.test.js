@@ -12,7 +12,7 @@ test("the client's postal-only TAS order uses the Remedy percentages", () => {
     mode: "INITIATOR", initiator: "REMEDY", reason: null,
     matrixKey: "19442|INITIATOR (REMEDY)"
   });
-  assert.deepEqual(matrix[routing.matrixKey], { DIMOU_DASKALAKI_PATRAS: 100 });
+  assert.deepEqual(matrix[routing.matrixKey], { DIMOU_L_DIS: 100 });
   assert.deepEqual(skills, ["19442"]);
 });
 

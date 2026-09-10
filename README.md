@@ -1,31 +1,74 @@
-# Contractor allocation
+﻿# Subcontractor allocation and Service Call customer
 
-The wrapper reads `allocation-matrix.json`, generated from `matrix.xlsx`.
+The allocation source is `Assignment Flows 7_5 (3).xlsx`. The checked-in
+`matrix.xlsx` contains its **POSTAL CODE FLOW** sheet, which the generator selects
+by name. `allocation-matrix.json` is the runtime input. OTE SITE FLOW and
+COUNTY-MUNICIPALITY FLOW are not part of this postal-code route.
 
-When Service Call requirement skills contain a technology keyword (`FTTH`, `FWA`,
-`MESH`, `CLOUD&SYZEFIXIS`, or `DTH`), the existing sorted skill matrix key is used.
-The Excel spellings `CLOUD & SYZEFXIS` and `Subcontractor DTH/SBB` also count as
-technology keywords. This change does not translate skill names to Excel column
-names or change how multiple technology skills are combined.
+Regenerate with `npm run generate:matrix`. To retain the original source filename:
 
-When no technology keyword is present, allocation uses the postal code skill and
-the initiator inferred from `ServiceCall.externalId`:
+```
+node scripts/generate-allocation-matrix.js matrix.xlsx allocation-matrix.json "Assignment Flows 7_5 (3).xlsx"
+```
 
-- `PS...` selects `<postalCode>|INITIATOR (PASPORT)`.
-- `TAS...` selects `<postalCode>|INITIATOR (REMEDY)`.
+## Selection
 
-For example, `TAS000004497994` with skill `19442` uses
-`19442|INITIATOR (REMEDY)` and the percentages already configured in that row.
-The initiator is not added to Optimization's mandatory skills. Existing resource
-availability, skill filtering, weighted allocation and result fallbacks remain
-in effect. Postal codes are expected as five-digit requirement skills.
+- Technology requirements select the postal code + technology column. Inbound
+  `DTH` maps to `Subcontractor DTH/SBB`; `CLOUD&SYZEFIXIS` maps to
+  `CLOUD & SYZEFXIS`. Multiple technology requirements retain the combined-key
+  behavior; there is no implicit priority between them.
+- Without a technology keyword, `PS...` uses `INITIATOR (PASPORT)` and `TAS...`
+  uses `INITIATOR (REMEDY)`. A five-digit postal requirement is still needed.
+- Percentages now allocate **SUB_CONTRACTOR** values directly, rather than grouping
+  them under the parent CONTRACTORS name. For `19442` and `TAS...`, the selection
+  is `DIMOU_L_DIS` at 100%.
 
-Unknown initiators, missing/ambiguous postal codes and missing matrix rows return
-the manual dispatch response. A missing technology matrix row does not switch to
-initiator allocation. Requests without any requirement skills retain the existing
-`MANDATORY_SKILLS_UNAVAILABLE` response.
+## Business Partner binding
 
-Search logs for `Contractor allocation routing:` to see the Service Call external
-ID, routing mode, initiator, matrix key and any routing failure reason.
+Before Optimization, the wrapper looks up `BusinessPartner.name` using the exact
+SUB_CONTRACTOR value (for example, `DIMOU_L_DIS`, not the directory display name
+`DIMOU L.&CO`). It PATCHes `ServiceCall.businessPartner` to the matching FSM ID.
+The current `lastChanged` protects the update from concurrent edits; `forceUpdate`
+is not used. See the [SAP Data API example](https://help.sap.com/docs/SAP_FIELD_SERVICE_MANAGEMENT/fsm_api_quick_start_guide/api-example-data-api.html).
 
-Run `npm test` for routing regression tests.
+Missing/duplicate matching BPs, invalid matrix cells and failed PATCHes produce
+manual-dispatch responses. No BP is created and no alternative company name is
+inferred. The Service Call link is retained when no technician or slot is available.
+A repeated request reuses an existing BP link that belongs to the same matrix row.
+Counters advance only after a successful new link. Requests for the same matrix
+key are serialized within this process; counters remain in memory and reset after
+restart, so multiple instances do not share a global allocation quota.
+
+`FSM_BUSINESS_PARTNER_DTO` can override the default `BusinessPartner.22` version.
+The API client needs permission to read BusinessPartner and update ServiceCall.
+
+## Resource selection and response
+
+Org Level is no longer looked up or used. Its legacy response fields remain null.
+Optimization still applies the original required skills and availability rules.
+The resource's `PersonContractor` UDF must resolve to the selected SUB_CONTRACTOR
+code. Without a matching resource, the wrapper returns manual dispatch instead of
+assigning a technician from a different subcontractor.
+
+The response includes `businessPartnerAssignment`; `results[0]` includes
+`actSubContractorName` and the BP ID after successful linking, including responses
+that require manual resource assignment. These response fields do not directly
+write an Activity UDF. The actual persisted change is `ServiceCall.businessPartner`.
+The existing `/score-with-org-level` route name remains compatible with callers.
+
+Logs: `Contractor allocation routing:`, `Service Call Business Partner assignment:`
+and `Service Call Business Partner assignment failed:`.
+
+## Source data issues
+
+Two PASPORT keys are blocked because their percentage cells contain text:
+
+- Row 105: `10223|INITIATOR (PASPORT)` contains `ICOM_EUVOIA_DIS`.
+- Row 692: `16450|INITIATOR (PASPORT)` contains `TIL_KARYS_STABELOU_DIS`.
+
+As in the previous generator, numeric totals other than 100 are normalized and
+reported in `warnings`: `18202|FTTH` totals 300 for one subcontractor;
+`57000|FWA` totals 200 across two subcontractors and becomes 50/50.
+
+Run `npm test`. Tests cover source import, initiator/technology routing, BP lookup,
+optimistic updates, quota reuse, and the HTTP handler with mocked external APIs.

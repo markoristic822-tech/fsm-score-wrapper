@@ -10,7 +10,7 @@ function buildSkillMatrixKey(skills) {
     .join("|");
 }
 
-function resolveAllocationRouting(skills, serviceCall = {}) {
+function resolveAllocationRouting(skills, serviceCall = {}, skillColumnMap = {}) {
   const hasTechnologyKeyword = skills.some((skill) =>
     TECHNOLOGY_KEYWORDS.test(
       String(skill).trim().toUpperCase().replace(/\s*&\s*/g, "&")
@@ -20,7 +20,7 @@ function resolveAllocationRouting(skills, serviceCall = {}) {
   if (hasTechnologyKeyword) {
     return {
       mode: "SKILL",
-      matrixKey: buildSkillMatrixKey(skills),
+      matrixKey: buildSkillMatrixKey(skills.map((skill) => skillColumnMap[String(skill).trim()] || skill)),
       initiator: null,
       reason: null
     };
