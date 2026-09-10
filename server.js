@@ -3,6 +3,7 @@ const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
 const { DateTime } = require("luxon");
+const { resolveAllocationRouting } = require("./allocation-routing");
 require("dotenv").config();
 
 const app = express();
@@ -1005,18 +1006,6 @@ async function resolveRequirementSkills(
   };
 }
 
-function buildSkillMatrixKey(skills) {
-  return [
-    ...new Set(
-      skills
-        .map((skill) => String(skill).trim())
-        .filter(Boolean)
-    )
-  ]
-    .sort()
-    .join("|");
-}
-
 function generateRollingSlots() {
   const timezone = "Europe/Athens";
   const daysAhead = 7;
@@ -1906,10 +1895,25 @@ app.post(
         );
       }
 
-      const matrixKey =
-        buildSkillMatrixKey(
-          mandatorySkills
+      const routing = resolveAllocationRouting(mandatorySkills, serviceCall);
+      const matrixKey = routing.matrixKey;
+
+      console.log("Contractor allocation routing:", {
+        serviceCallId,
+        serviceCallExternalId: serviceCall.externalId || null,
+        ...routing
+      });
+
+      if (routing.reason) {
+        return response.json(
+          buildManualDispatchResponse({
+            reason: routing.reason,
+            serviceCallId,
+            mandatorySkills,
+            details: routing
+          })
         );
+      }
 
       console.log(
         "Contractor matrix key:",

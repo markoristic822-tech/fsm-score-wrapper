@@ -6,7 +6,7 @@
   "scripts": {
     "generate:matrix": "node scripts/generate-allocation-matrix.js",
     "simulate:allocation": "node scripts/simulate-allocation.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test"
   },
   "keywords": [],
   "author": "",
