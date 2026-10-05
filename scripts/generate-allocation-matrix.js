@@ -23,41 +23,51 @@ function parseWeight(value) {
 }
 
 function generateMatrix(book, sourceFile) {
-  const sheetName = book.SheetNames.find((name) => header(name) === "POSTAL CODE FLOW");
-  if (!sheetName) throw new Error("Required POSTAL CODE FLOW sheet was not found");
-  const rows = XLSX.utils.sheet_to_json(book.Sheets[sheetName], { header: 1, defval: null });
-  const headers = rows[0] || [];
-  const postalIndex = column(headers, "POSTAL");
-  const subIndex = column(headers, "SUB_CONTRACTOR");
-  const parentIndex = column(headers, "CONTRACTORS");
-  const skills = SKILL_COLUMNS.map((name) => ({ name, index: column(headers, name) }));
   const matrix = {};
   const subcontractors = {};
   const warnings = [];
   const invalidMatrixKeys = {};
-  for (let index = 1; index < rows.length; index++) {
-    const row = rows[index];
-    const postalCode = clean(row[postalIndex]);
-    if (!postalCode) continue;
-    if (!/^\d{5}$/.test(postalCode)) throw new Error(`Invalid postal code at row ${index + 1}`);
-    const code = clean(row[subIndex]);
-    if (!code) throw new Error(`SUB_CONTRACTOR is missing at row ${index + 1}`);
-    subcontractors[code] ||= { code, name: code, contractorName: clean(row[parentIndex]) };
-    for (const { name, index: skillIndex } of skills) {
-      const key = `${postalCode}|${name}`;
-      const weight = parseWeight(row[skillIndex]);
-      if (weight === null) {
-        const warning = { type: "INVALID_WEIGHT", row: index + 1, matrixKey: key,
-          subcontractor: code, rawValue: row[skillIndex] };
-        warnings.push(warning);
-        (invalidMatrixKeys[key] ||= []).push(warning);
-        continue;
+
+  function appendFlow(expectedSheetName, keyColumn, subcontractorColumn, prefix = "") {
+    const sheetName = book.SheetNames.find((name) => header(name) === expectedSheetName);
+    if (!sheetName) throw new Error(`Required ${expectedSheetName} sheet was not found`);
+    const sheet = book.Sheets[sheetName];
+    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null });
+    const headers = rows[0] || [];
+    const keyIndex = column(headers, keyColumn);
+    const subIndex = column(headers, subcontractorColumn);
+    const parentIndex = column(headers, "CONTRACTORS");
+    const skills = SKILL_COLUMNS.map((name) => ({ name, index: column(headers, name) }));
+    for (let index = 1; index < rows.length; index++) {
+      const row = rows[index];
+      // Read OTE codes as displayed strings, preserving Excel zero-padding.
+      const cell = sheet[XLSX.utils.encode_cell({ r: index, c: keyIndex })];
+      const area = prefix ? clean(cell ? XLSX.utils.format_cell(cell) : "").toUpperCase() : clean(row[keyIndex]);
+      if (!area) continue;
+      if (!prefix && !/^\d{5}$/.test(area)) throw new Error(`Invalid postal code at row ${index + 1}`);
+      const code = clean(row[subIndex]);
+      if (!code) throw new Error(`${subcontractorColumn} is missing at row ${index + 1} in ${sheetName.trim()}`);
+      subcontractors[code] ||= { code, name: code, contractorName: clean(row[parentIndex]) };
+      for (const { name, index: skillIndex } of skills) {
+        const key = `${prefix}${area}|${name}`;
+        const weight = parseWeight(row[skillIndex]);
+        if (weight === null) {
+          const warning = { type: "INVALID_WEIGHT", row: index + 1, matrixKey: key,
+            subcontractor: code, rawValue: row[skillIndex] };
+          warnings.push(warning);
+          (invalidMatrixKeys[key] ||= []).push(warning);
+          continue;
+        }
+        if (weight <= 0) continue;
+        matrix[key] ||= {};
+        matrix[key][code] = (matrix[key][code] || 0) + weight;
       }
-      if (weight <= 0) continue;
-      matrix[key] ||= {};
-      matrix[key][code] = (matrix[key][code] || 0) + weight;
     }
+    return sheetName.trim();
   }
+
+  const sheetName = appendFlow("POSTAL CODE FLOW", "POSTAL", "SUB_CONTRACTOR");
+  const oteSheetName = appendFlow("OTE SITE FLOW", "PasPortCode", "CONTRACTOR", "OTE_SITE|");
 
   // Invalid cells block their whole key instead of changing the other shares.
   for (const key of Object.keys(invalidMatrixKeys)) delete matrix[key];
@@ -72,7 +82,7 @@ function generateMatrix(book, sourceFile) {
   }
 
   return {
-    generatedAt: new Date().toISOString(), sourceFile, sheetName: sheetName.trim(),
+    generatedAt: new Date().toISOString(), sourceFile, sheetName, oteSheetName,
     skillColumns: SKILL_COLUMNS,
     skillColumnMap: { "CLOUD&SYZEFIXIS": "CLOUD & SYZEFXIS", DTH: "Subcontractor DTH/SBB" },
     contractorCodeMap: Object.fromEntries(Object.keys(subcontractors).map((code) => [code, code])),

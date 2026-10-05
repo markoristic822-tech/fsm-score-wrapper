@@ -6,11 +6,14 @@ const { DateTime } = require("luxon");
 const { resolveAllocationRouting } = require("./allocation-routing");
 const { BusinessPartnerAssignment } = require("./business-partner-assignment");
 const { ServiceCallTechnology } = require("./service-call-technology");
+const { AssignmentContext, registerAssignmentContextRoute } = require("./assignment-context");
 require("dotenv").config();
 
 const app = express();
 app.set("trust proxy", true);
 app.use(express.json({ limit: "10mb" }));
+const assignmentContexts = new AssignmentContext();
+registerAssignmentContextRoute(app, assignmentContexts, process.env.ASSIGNMENT_CONTEXT_KEY);
 
 const {
   PORT = 3000,
@@ -39,8 +42,8 @@ const PERSON_CONTRACTOR_UDF_META_ID =
 
 /*
  * Matrica se generise iz matrix.xlsx u allocation-matrix.json.
- * Key je kombinacija skillova koju FSM vrati kroz Requirement/Tag DTO,
- * npr. postal code + tip posla: 10010|FWA.
+ * Postal keys remain unchanged (10010|FWA). OTE keys use their own
+ * namespace (OTE_SITE|19|FWA), with the same allocation sequences.
  */
 const ALLOCATION_MATRIX_PATH =
   process.env.ALLOCATION_MATRIX_PATH ||
@@ -1499,11 +1502,7 @@ app.post(
 
       console.log(
         "Incoming body:",
-        JSON.stringify(
-          request.body,
-          null,
-          2
-        )
+        { serviceCallId: request.body?.serviceCallId, hasWorkOrder: request.body?.workOrder != null }
       );
 
       const serviceCallId =
@@ -1563,9 +1562,21 @@ app.post(
         resolvedRequirementSkills
           .mandatorySkills;
 
+      const workOrder = request.body?.workOrder ?? assignmentContexts.read(serviceCall.externalId);
+      console.log("Assignment context source:", {
+        serviceCallId,
+        source: request.body?.workOrder != null ? "DIRECT_REQUEST" : workOrder ? "SOAP_CONTEXT" : "LEGACY"
+      });
+      const hasOteContext = workOrder != null &&
+        !String(workOrder.addressInfo?.postalCode ?? "").trim() &&
+        Boolean(String(workOrder.externalSystemInfo?.oteSiteId ?? "").trim());
+
       if (
-        mandatorySkills.length === 0
+        mandatorySkills.length === 0 && !hasOteContext
       ) {
+        if (workOrder != null && !String(workOrder.addressInfo?.postalCode ?? "").trim()) {
+          console.log("Postal Code and OTE Site ID not provided. No Region fallback is configured; manual dispatch required.");
+        }
         return response.json(
           buildManualDispatchResponse({
             reason:
@@ -1585,15 +1596,28 @@ app.post(
 
       let technology;
       try {
-        technology = await serviceCallTechnology.read(serviceCall, token);
+        technology = workOrder != null
+          ? String(workOrder.technicalInfo?.technology ?? "").trim()
+          : await serviceCallTechnology.read(serviceCall, token);
       } catch (error) {
         return response.json(buildManualDispatchResponse({
           reason: "SERVICE_CALL_TECHNOLOGY_LOOKUP_FAILED", serviceCallId, mandatorySkills,
           details: { message: error.message }
         }));
       }
-      const routing = resolveAllocationRouting(mandatorySkills, serviceCall, allocationConfig.skillColumnMap, technology);
+      const routing = resolveAllocationRouting(mandatorySkills, serviceCall, allocationConfig.skillColumnMap, technology, workOrder);
       const matrixKey = routing.matrixKey;
+
+      console.log("Assignment lookup strategy:", {
+        serviceCallId, strategy: routing.strategy,
+        postalCode: routing.postalCode || null,
+        oteSiteId: routing.oteSiteId || null, oteSite: routing.oteSite || null
+      });
+      if (routing.strategy === "OTE_SITE") {
+        console.log("Postal Code not provided. Switching to OTE Site assignment.");
+      } else if (routing.strategy === "NONE") {
+        console.log("Postal Code and OTE Site ID not provided. No Region fallback is configured; manual dispatch required.");
+      }
 
       console.log("Contractor allocation routing:", {
         serviceCallId,
@@ -1622,6 +1646,9 @@ app.post(
           matrixKey
         ]
       ) {
+        if (routing.strategy === "OTE_SITE") {
+          console.log("No usable OTE Site matrix entry found:", { oteSiteId: routing.oteSiteId, matrixKey });
+        }
         return response.json(
           buildManualDispatchResponse({
             reason:
@@ -1638,7 +1665,14 @@ app.post(
       let assignment;
       try {
         assignment = await businessPartnerAssignment.assign(serviceCallId, matrixKey, token);
+        assignment.lookupStrategy = routing.strategy;
         console.log("Service Call Business Partner assignment:", { serviceCallId, ...assignment });
+        if (routing.strategy === "OTE_SITE") {
+          console.log("OTE Site matrix match found:", {
+            oteSiteId: routing.oteSiteId, matrixKey,
+            businessPartner: assignment.businessPartner.id, subcontractor: assignment.selectedContractor
+          });
+        }
       } catch (error) {
         console.error("Service Call Business Partner assignment failed:", {
           serviceCallId, matrixKey, message: error.message

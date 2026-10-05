@@ -14,6 +14,8 @@ async function score(externalId, skills, options = {}) {
   const routes = new Map();
   const optimizationRequests = [];
   const bpUpdates = [];
+  const logs = [];
+  const reads = [];
   const app = {
     set() {}, use() {}, get() {},
     post(route, handler) { routes.set(route, handler); },
@@ -23,6 +25,7 @@ async function score(externalId, skills, options = {}) {
   const localRequire = createRequire(path.join(root, "server.js"));
   const axios = {
     async get(url) {
+      reads.push(url);
       if (url.includes('/UdfMeta?')) {
         if (options.metadataError) throw new Error("Metadata unavailable");
         return { data: { data: [{ udfMeta: { id: "technology-meta", externalId: "DIS_SC_TECHNOLOGY" } }] } };
@@ -51,6 +54,7 @@ async function score(externalId, skills, options = {}) {
     "FSM_ACCOUNT_NAME", "FSM_COMPANY_ID", "FSM_COMPANY_NAME"
   ].map((key) => [key, "test"]));
   env.OPTIMIZATION_URL = "https://optimization.test";
+  env.ASSIGNMENT_CONTEXT_KEY = "test-context-key";
   const context = vm.createContext({
     require(name) {
       if (name === "express") return express;
@@ -59,7 +63,7 @@ async function score(externalId, skills, options = {}) {
       return localRequire(name);
     },
     __dirname: root,
-    console: { log() {}, error() {} },
+    console: { log(...args) { logs.push(args); }, error(...args) { logs.push(args); } },
     process: { env, on() {}, exit() { throw new Error("Unexpected exit"); } },
     fixture: { externalId, skills, contractor: options.contractor || "DIMOU_L_DIS", udfValues: options.udfValues || [] }
   });
@@ -78,12 +82,23 @@ async function score(externalId, skills, options = {}) {
       udfValues: [{ meta: PERSON_CONTRACTOR_UDF_META_ID, value: fixture.contractor }]
     } });
   `, context);
+  if (options.registeredWorkOrder) {
+    let accepted;
+    routes.get("/assignment/context")({
+      body: { externalId: options.contextExternalId || externalId, workOrder: options.registeredWorkOrder },
+      headers: { "x-assignment-context-key": "test-context-key" }
+    }, {
+      status(code) { assert.equal(code, 200); return this; },
+      json(value) { accepted = value; }
+    });
+    assert.equal(accepted.accepted, true);
+  }
   let result;
   await routes.get("/score-with-org-level")(
-    { body: { serviceCallId: "sc-1" }, headers: {} },
+    { body: { serviceCallId: "sc-1", ...(options.workOrder === undefined ? {} : { workOrder: options.workOrder }) }, headers: {} },
     { json(value) { result = JSON.parse(JSON.stringify(value)); return result; } }
   );
-  return { result, optimizationRequests, bpUpdates };
+  return { result, optimizationRequests, bpUpdates, logs, reads };
 }
 
 test("postal-only orders reach Optimization and contractor selection using initiator weights", async () => {
@@ -148,4 +163,95 @@ test("failed technology lookup does not assign a BP using a fallback row", async
   assert.equal(result.fallbackReason, "SERVICE_CALL_TECHNOLOGY_LOOKUP_FAILED");
   assert.equal(bpUpdates.length, 0);
   assert.equal(optimizationRequests.length, 0);
+});
+
+test("postal flow wins over OTE and an unknown postal never falls through", async () => {
+  const workOrder = { addressInfo: { postalCode: "19442" }, externalSystemInfo: { oteSiteId: "19" } };
+  const { result } = await score("TAS123", ["19442"], { workOrder });
+  assert.equal(result.allocation.matrixKey, "19442|INITIATOR (REMEDY)");
+  assert.equal(result.businessPartnerAssignment.lookupStrategy, "POSTAL_CODE");
+  workOrder.addressInfo.postalCode = "00000";
+  const missing = await score("TAS123", ["19442"], { workOrder });
+  assert.equal(missing.result.fallbackReason, "ALLOCATION_MATRIX_NOT_CONFIGURED");
+  assert.equal(missing.bpUpdates.length, 0);
+});
+
+test("missing, empty and blank postal uses OTE matrix, links BP, and keeps Optimization skills", async () => {
+  for (const postalCode of [null, "", "   "]) {
+    const { result, optimizationRequests, reads, logs } = await score("PS123", ["MESH", "FTTH"], {
+      workOrder: {
+        addressInfo: { postalCode }, externalSystemInfo: { oteSiteId: "19", oteSite: "OTE description" },
+        technicalInfo: { technology: "FTTH-GPON" }
+      },
+      // Original input must win, with no UDF metadata read even when FSM disagrees.
+      udfValues: [{ meta: "technology-meta", value: "MESH" }], metadataError: true,
+      businessPartnerName: "SAT_PRAXIS_DIS", contractor: "SAT_PRAXIS_DIS"
+    });
+    assert.equal(result.allocation.matrixKey, "OTE_SITE|19|FTTH");
+    assert.equal(result.businessPartnerAssignment.lookupStrategy, "OTE_SITE");
+    assert.equal(result.results[0].actSubContractorName, "SAT_PRAXIS_DIS");
+    assert.deepEqual(optimizationRequests[0].job.mandatorySkills, ["MESH", "FTTH"]);
+    assert.equal(reads.filter((url) => url.includes("/UdfMeta?")).length, 0);
+    assert.ok(logs.some(([message, details]) => message === "OTE Site matrix match found:" && details.businessPartner === "bp-1"));
+  }
+});
+
+test("OTE initiator allocation works with no postal or technology skill", async () => {
+  for (const externalId of ["TAS123", "PS123"]) {
+    const { result, bpUpdates } = await score(externalId, [], {
+      workOrder: { externalSystemInfo: { oteSiteId: "126" } }
+    });
+    assert.equal(result.manualDispatchRequired, undefined);
+    assert.equal(result.businessPartnerAssignment.lookupStrategy, "OTE_SITE");
+    assert.equal(result.businessPartnerAssignment.businessPartner.name, "DIMOU_L_DIS");
+    assert.equal(bpUpdates.length, 1);
+  }
+});
+
+test("no Region implementation: missing IDs and unknown OTE retain manual dispatch without BP writes", async () => {
+  for (const oteSiteId of [null, "", "   ", "UNKNOWN-SITE"]) {
+    const { result, bpUpdates, optimizationRequests, logs } = await score("TAS123", ["LLU"], {
+      workOrder: {
+        addressInfo: { postalCode: null, prefecture: "ATTICA" },
+        externalSystemInfo: { oteSiteId, oteSite: "126" }
+      }
+    });
+    assert.equal(result.manualDispatchRequired, true);
+    assert.equal(result.fallbackReason, oteSiteId === "UNKNOWN-SITE" ? "ALLOCATION_MATRIX_NOT_CONFIGURED" : "POSTAL_CODE_UNAVAILABLE");
+    assert.equal(bpUpdates.length, 0);
+    assert.equal(optimizationRequests.length, 0);
+    assert.ok(logs.some(([message]) => String(message).includes(oteSiteId === "UNKNOWN-SITE"
+      ? "No usable OTE Site matrix entry found" : "No Region fallback is configured")));
+  }
+});
+
+test("legacy callers do not use Service Call OTE UDFs as assignment input", async () => {
+  const { result, bpUpdates } = await score("TAS123", ["LLU"], {
+    udfValues: [{ meta: { externalId: "DIS_SC_OTE_SITE_ID" }, value: "126" }]
+  });
+  assert.equal(result.fallbackReason, "POSTAL_CODE_UNAVAILABLE");
+  assert.equal(bpUpdates.length, 0);
+});
+
+test("SOAP context registered before creation routes an unchanged FSM callback using the original OTE data", async () => {
+  const { result, reads, logs } = await score("PS123", ["MESH", "FTTH"], {
+    registeredWorkOrder: {
+      addressInfo: { postalCode: "" }, externalSystemInfo: { oteSiteId: "19" },
+      technicalInfo: { technology: "FTTH-GPON" }
+    },
+    udfValues: [{ meta: "technology-meta", value: "MESH" }], metadataError: true,
+    businessPartnerName: "SAT_PRAXIS_DIS", contractor: "SAT_PRAXIS_DIS"
+  });
+  assert.equal(result.allocation.matrixKey, "OTE_SITE|19|FTTH");
+  assert.equal(result.businessPartnerAssignment.lookupStrategy, "OTE_SITE");
+  assert.equal(reads.filter((url) => url.includes("/UdfMeta?")).length, 0);
+  assert.ok(logs.some(([message, details]) => message === "Assignment context source:" && details.source === "SOAP_CONTEXT"));
+});
+
+test("a context registered for another externalId cannot affect assignment", async () => {
+  const { result, bpUpdates } = await score("PS123", ["LLU"], {
+    contextExternalId: "PSOTHER", registeredWorkOrder: { externalSystemInfo: { oteSiteId: "126" } }
+  });
+  assert.equal(result.fallbackReason, "POSTAL_CODE_UNAVAILABLE");
+  assert.equal(bpUpdates.length, 0);
 });
