@@ -1,6 +1,7 @@
 ﻿const fs = require("fs");
 const path = require("path");
 const XLSX = require("xlsx");
+const { normalizeOteSiteId } = require("../allocation-routing");
 
 const SKILL_COLUMNS = ["INITIATOR (PASPORT)", "INITIATOR (REMEDY)",
   "FWA", "FTTH", "MESH", "CLOUD & SYZEFXIS", "Subcontractor DTH/SBB"];
@@ -40,9 +41,9 @@ function generateMatrix(book, sourceFile) {
     const skills = SKILL_COLUMNS.map((name) => ({ name, index: column(headers, name) }));
     for (let index = 1; index < rows.length; index++) {
       const row = rows[index];
-      // Read OTE codes as displayed strings, preserving Excel zero-padding.
+      // Use the same OTE normalization as incoming Siebel requests.
       const cell = sheet[XLSX.utils.encode_cell({ r: index, c: keyIndex })];
-      const area = prefix ? clean(cell ? XLSX.utils.format_cell(cell) : "").toUpperCase() : clean(row[keyIndex]);
+      const area = prefix ? normalizeOteSiteId(cell ? XLSX.utils.format_cell(cell) : "") : clean(row[keyIndex]);
       if (!area) continue;
       if (!prefix && !/^\d{5}$/.test(area)) throw new Error(`Invalid postal code at row ${index + 1}`);
       const code = clean(row[subIndex]);

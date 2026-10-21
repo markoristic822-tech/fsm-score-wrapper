@@ -107,6 +107,25 @@ async function score(externalId, skills, options = {}) {
   return { result, optimizationRequests, bpUpdates, logs, reads };
 }
 
+test("padded OTE codes from the failed live orders select their subcontractors", async () => {
+  for (const [externalId, oteSiteId, skills, contractor, key] of [
+    ["TAS000006330585", "048", [], "DIMOU_L_DIS", "OTE_SITE|48|INITIATOR (REMEDY)"],
+    ["PS11983849", "039", [], "SAT_PRAXIS_DIS", "OTE_SITE|39|INITIATOR (PASPORT)"],
+    ["PS11983909", "009", ["FWA"], "SAT_PRAXIS_DIS", "OTE_SITE|9|FWA"],
+    ["PS11983919", "009", ["FWA"], "SAT_PRAXIS_DIS", "OTE_SITE|9|FWA"],
+    ["PS11983918", "009", ["FWA"], "SAT_PRAXIS_DIS", "OTE_SITE|9|FWA"]
+  ]) {
+    const { result, bpUpdates } = await score(externalId, skills, {
+      workOrder: { addressInfo: { postalCode: "" }, externalSystemInfo: { oteSiteId } },
+      businessPartnerName: contractor, contractor
+    });
+    assert.equal(result.allocation.matrixKey, key);
+    assert.equal(result.allocation.selectedContractor, contractor);
+    assert.equal(bpUpdates.length, 1);
+    assert.equal(result.results[0].resource, "person-1");
+  }
+});
+
 test("BP display name can change while resource selection uses the matrix external ID", async () => {
   const { result, bpUpdates } = await score("TAS123", ["19442"], {
     businessPartnerDisplayName: "DIMOU L.&CO"

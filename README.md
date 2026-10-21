@@ -25,12 +25,12 @@ node scripts/generate-allocation-matrix.js matrix.xlsx allocation-matrix.json "A
   **OTE_NAME** / `oteSite` is descriptive, never a lookup key. The remaining
   columns are POSTAL, REGION, INITIATOR (PASPORT), INITIATOR (REMEDY), FWA, FTTH,
   MESH, CLOUD & SYZEFXIS, Subcontractor DTH/SBB, CONTRACTORS and ΣΧΟΛΙΑ.
-- OTE identifiers are trimmed strings, matched case-insensitively. Text and
-  Excel-formatted leading zeros are retained: `0001`, `OTE-001` and `ATH-05`
-  remain distinct identifiers. The source workbook stores numeric **19** with
-  General formatting, so it is **not** a match for incoming `019`; canonical
-  codes must agree between Excel and Siebel. No numeric coercion or name-based
-  fallback is applied.
+- OTE identifiers are trimmed and matched case-insensitively. Purely numeric
+  codes discard leading zeros in both request routing and Excel generation:
+  `009` matches `9`, `039` matches `39`, and `048` matches `48`. This uses string
+  normalization to avoid numeric precision loss. Alphanumeric codes such as
+  `OTE-001` and `ATH-05` retain their zeros. Postal codes and the stored original
+  SOAP context are unchanged; OTE names are never used as fallback keys.
 - Missing both area identifiers, unknown OTE rows and invalid percentage cells
   retain manual dispatch. No Region assignment or cross-area fallback is added.
 - The Service Call UDF `DIS_SC_TECHNOLOGY` (from SOAP `technicalInfo.technology`)

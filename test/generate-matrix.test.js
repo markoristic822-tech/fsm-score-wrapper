@@ -32,7 +32,7 @@ function oteFixture(rows) {
   return book;
 }
 
-test("OTE uses PasPortCode and CONTRACTOR, preserving text and formatted leading zeros", () => {
+test("OTE normalizes numeric PasPortCode padding and preserves alphanumeric codes", () => {
   const book = oteFixture([
     ["15125", "  ote-001  ", "Same name", "Region", "OTE_BP", 1, 1, 1, 1, 1, 1, 1, "Parent"],
     ["15125", "0001", "Same name", "Region", "ZERO_BP", 1, 1, 1, 1, 1, 1, 1, "Parent"],
@@ -41,9 +41,9 @@ test("OTE uses PasPortCode and CONTRACTOR, preserving text and formatted leading
   book.Sheets["OTE SITE FLOW"].B4.z = "0000";
   const result = generateMatrix(book, "fixture.xlsx");
   assert.deepEqual(result.matrix["OTE_SITE|OTE-001|FTTH"], { OTE_BP: 100 });
-  assert.deepEqual(result.matrix["OTE_SITE|0001|FTTH"], { ZERO_BP: 100 });
-  assert.deepEqual(result.matrix["OTE_SITE|0002|FTTH"], { FORMATTED_BP: 100 });
-  assert.equal(result.matrix["OTE_SITE|1|FTTH"], undefined);
+  assert.deepEqual(result.matrix["OTE_SITE|1|FTTH"], { ZERO_BP: 100 });
+  assert.deepEqual(result.matrix["OTE_SITE|2|FTTH"], { FORMATTED_BP: 100 });
+  assert.equal(result.matrix["OTE_SITE|0001|FTTH"], undefined);
   assert.equal(result.matrix["OTE_SITE|SAME NAME|FTTH"], undefined);
   assert.equal(result.matrix["OTE_SITE|15125|FTTH"], undefined);
 });

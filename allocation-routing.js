@@ -13,6 +13,12 @@ function buildSkillMatrixKey(skills) {
 const clean = (value) => String(value ?? "").trim();
 const isPostalCode = (value) => /^\d{5}$/.test(clean(value));
 
+function normalizeOteSiteId(value) {
+  const code = clean(value).toUpperCase();
+  // Normalize numeric identifiers without Number() precision loss.
+  return /^\d+$/.test(code) ? code.replace(/^0+(?=\d)/, "") : code;
+}
+
 function resolveAllocationRouting(skills, serviceCall = {}, skillColumnMap = {}, technology = "", workOrder) {
   // Existing FSM callers can keep sending only serviceCallId. New callers pass
   // the original Siebel model; its address selects the area, never an FSM UDF.
@@ -30,7 +36,7 @@ function resolveAllocationRouting(skills, serviceCall = {}, skillColumnMap = {},
       strategy: "POSTAL_CODE", postalCode
     };
   }
-  const oteSiteId = clean(workOrder.externalSystemInfo?.oteSiteId).toUpperCase();
+  const oteSiteId = normalizeOteSiteId(workOrder.externalSystemInfo?.oteSiteId);
   const oteSite = clean(workOrder.externalSystemInfo?.oteSite);
   if (oteSiteId) {
     return {
@@ -103,4 +109,4 @@ function resolveMatrixRouting(skills, serviceCall, skillColumnMap, technology, o
   };
 }
 
-module.exports = { resolveAllocationRouting };
+module.exports = { resolveAllocationRouting, normalizeOteSiteId };

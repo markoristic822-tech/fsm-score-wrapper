@@ -45,12 +45,14 @@ test("OTE reuses technology precedence and PS/TAS initiator percentages", () => 
     "OTE_SITE|19|FTTH|MESH");
 });
 
-test("OTE IDs retain leading zeros, letters and separators; names never become lookup keys", () => {
-  for (const id of ["0001", "OTE-001", "ATH-05"]) {
+test("numeric OTE IDs discard padding; letters and separators remain unchanged", () => {
+  for (const [id, expected] of [["0001", "1"], ["009", "9"], ["039", "39"],
+    [" 048 ", "48"], ["000", "0"], ["0009007199254740993", "9007199254740993"],
+    ["OTE-001", "OTE-001"], ["ATH-05", "ATH-05"]]) {
     const routing = resolveAllocationRouting(["FTTH"], {}, {}, "", {
       externalSystemInfo: { oteSiteId: id, oteSite: "19" }
     });
-    assert.equal(routing.matrixKey, `OTE_SITE|${id}|FTTH`);
+    assert.equal(routing.matrixKey, `OTE_SITE|${expected}|FTTH`);
   }
   for (const oteSiteId of [undefined, null, "", "   "]) {
     const routing = resolveAllocationRouting(["FTTH"], {}, {}, "", {
