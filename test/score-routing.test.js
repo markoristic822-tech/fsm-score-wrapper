@@ -31,7 +31,12 @@ async function score(externalId, skills, options = {}) {
         return { data: { data: [{ udfMeta: { id: "technology-meta", externalId: "DIS_SC_TECHNOLOGY" } }] } };
       }
       assert.ok(url.includes('/BusinessPartner?'));
-      return { data: { data: [{ businessPartner: { id: 'bp-1', name: options.businessPartnerName || 'DIMOU_L_DIS' } }] } };
+      assert.ok(new URL(url).searchParams.get("query").startsWith("externalId="));
+      return { data: { data: [{ businessPartner: {
+        id: 'bp-1',
+        name: options.businessPartnerDisplayName || options.businessPartnerName || 'DIMOU_L_DIS',
+        externalId: options.businessPartnerName || 'DIMOU_L_DIS'
+      } }] } };
     },
     async patch(url, payload) {
       assert.ok(url.includes('/ServiceCall/sc-1?'));
@@ -53,6 +58,7 @@ async function score(externalId, skills, options = {}) {
     "FSM_BASE_URL", "FSM_CLIENT_ID", "FSM_CLIENT_SECRET", "FSM_ACCOUNT_ID",
     "FSM_ACCOUNT_NAME", "FSM_COMPANY_ID", "FSM_COMPANY_NAME"
   ].map((key) => [key, "test"]));
+  env.FSM_BASE_URL = "https://fsm.test";
   env.OPTIMIZATION_URL = "https://optimization.test";
   env.ASSIGNMENT_CONTEXT_KEY = "test-context-key";
   const context = vm.createContext({
@@ -100,6 +106,17 @@ async function score(externalId, skills, options = {}) {
   );
   return { result, optimizationRequests, bpUpdates, logs, reads };
 }
+
+test("BP display name can change while resource selection uses the matrix external ID", async () => {
+  const { result, bpUpdates } = await score("TAS123", ["19442"], {
+    businessPartnerDisplayName: "DIMOU L.&CO"
+  });
+  assert.equal(result.allocation.selectedContractor, "DIMOU_L_DIS");
+  assert.equal(result.results[0].resource, "person-1");
+  assert.equal(result.results[0].actSubContractorName, "DIMOU L.&CO");
+  assert.equal(result.businessPartnerAssignment.businessPartner.externalId, "DIMOU_L_DIS");
+  assert.equal(bpUpdates[0].businessPartner, "bp-1");
+});
 
 test("postal-only orders reach Optimization and contractor selection using initiator weights", async () => {
   for (const [externalId, initiator] of [["TAS000004497994", "REMEDY"], ["PS123", "PASPORT"]]) {

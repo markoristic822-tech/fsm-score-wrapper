@@ -21,7 +21,7 @@ node scripts/generate-allocation-matrix.js matrix.xlsx allocation-matrix.json "A
   including when the postal code is invalid or has no configured allocation.
 - Only when the incoming postal code is missing/null/blank,
   `externalSystemInfo.oteSiteId` selects the OTE flow. It matches **PasPortCode**
-  in **OTE SITE FLOW**; **CONTRACTOR** supplies the subcontractor BP name.
+  in **OTE SITE FLOW**; **CONTRACTOR** supplies the subcontractor BP external ID.
   **OTE_NAME** / `oteSite` is descriptive, never a lookup key. The remaining
   columns are POSTAL, REGION, INITIATOR (PASPORT), INITIATOR (REMEDY), FWA, FTTH,
   MESH, CLOUD & SYZEFXIS, Subcontractor DTH/SBB, CONTRACTORS and ΣΧΟΛΙΑ.
@@ -109,13 +109,15 @@ and requests missing both area identifiers do not call this endpoint.
 
 ## Business Partner binding
 
-Before Optimization, the wrapper looks up `BusinessPartner.name` using the exact
+Before Optimization, the wrapper looks up `BusinessPartner.externalId` using the exact
 SUB_CONTRACTOR value (for example, `DIMOU_L_DIS`, not the directory display name
-`DIMOU L.&CO`). It PATCHes `ServiceCall.businessPartner` to the matching FSM ID.
+`DIMOU L.&CO`). The display `name` may change independently; there is no fallback
+to name. Ensure each BP's `externalId` equals its matrix subcontractor code before
+deploying this change. It PATCHes `ServiceCall.businessPartner` to the matching FSM ID.
 The current `lastChanged` protects the update from concurrent edits; `forceUpdate`
 is not used. See the [SAP Data API example](https://help.sap.com/docs/SAP_FIELD_SERVICE_MANAGEMENT/fsm_api_quick_start_guide/api-example-data-api.html).
 
-Missing/duplicate matching BPs, invalid matrix cells and failed PATCHes produce
+Missing/duplicate matching BP external IDs, invalid matrix cells and failed PATCHes produce
 manual-dispatch responses. No BP is created and no alternative company name is
 inferred. The Service Call link is retained when no technician or slot is available.
 A repeated request reuses an existing BP link that belongs to the same matrix row.
@@ -140,6 +142,9 @@ The response includes `businessPartnerAssignment`; `results[0]` includes
 `actSubContractorName` and the BP ID after successful linking, including responses
 that require manual resource assignment. These response fields do not directly
 write an Activity UDF. The actual persisted change is `ServiceCall.businessPartner`.
+`actSubContractorName` remains the BP display name. `selectedContractor` and
+resource filtering by `PersonContractor` retain the matrix code; the assignment's
+`businessPartner` object includes `id`, `name` and `externalId`.
 The existing `/score-with-org-level` route name remains compatible with callers.
 
 Logs: `Contractor allocation routing:`, `Service Call Business Partner assignment:`

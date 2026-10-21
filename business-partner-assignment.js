@@ -23,15 +23,15 @@ class BusinessPartnerAssignment {
     finally { if (this.pending.get(matrixKey) === operation) this.pending.delete(matrixKey); }
   }
 
-  async findByName(name, token) {
-    const query = `name=${JSON.stringify(name)}`;
+  async findByExternalId(externalId, token) {
+    const query = `externalId=${JSON.stringify(externalId)}`;
     const url = `${this.baseUrl}/api/data/v4/BusinessPartner?dtos=${encodeURIComponent(this.businessPartnerDto)}` +
       `&query=${encodeURIComponent(query)}&pageSize=2`;
     const response = await this.client.get(url, { headers: this.headers(token) });
     const rows = response.data?.data;
     if (!Array.isArray(rows)) throw failure("BUSINESS_PARTNER_RESPONSE_INVALID", "BusinessPartner lookup returned no data array");
     return rows.map((row) => row.businessPartner || row.BusinessPartner || row)
-      .filter((partner) => partner?.id && partner.name === name);
+      .filter((partner) => partner?.id && partner.externalId === externalId);
   }
 
   async assignNow(serviceCallId, matrixKey, token) {
@@ -42,7 +42,9 @@ class BusinessPartnerAssignment {
     if (!serviceCall) throw failure("SERVICE_CALL_NOT_FOUND", `Service Call ${serviceCallId} was not found`);
     const existingId = serviceCall.businessPartner?.id || serviceCall.businessPartner;
     const matches = new Map();
-    for (const name of Object.keys(weights)) matches.set(name, await this.findByName(name, token));
+    for (const externalId of Object.keys(weights)) {
+      matches.set(externalId, await this.findByExternalId(externalId, token));
+    }
 
     const counterBefore = this.counters[matrixKey] || 0;
     const sequencePosition = counterBefore % sequence.length;
@@ -50,8 +52,8 @@ class BusinessPartnerAssignment {
     const selectedContractor = existing?.[0] || sequence[sequencePosition];
     const partners = matches.get(selectedContractor);
     if (partners.length !== 1) throw failure(
-      partners.length ? "BUSINESS_PARTNER_NAME_AMBIGUOUS" : "BUSINESS_PARTNER_NOT_FOUND",
-      `Expected one BusinessPartner named ${selectedContractor}; found ${partners.length}`
+      partners.length ? "BUSINESS_PARTNER_EXTERNAL_ID_AMBIGUOUS" : "BUSINESS_PARTNER_NOT_FOUND",
+      `Expected one BusinessPartner with externalId ${selectedContractor}; found ${partners.length}`
     );
     const partner = partners[0];
     if (!existing) {
@@ -65,7 +67,7 @@ class BusinessPartnerAssignment {
     }
     return {
       matrixKey, selectedContractor, preferredContractor: selectedContractor,
-      businessPartner: { id: partner.id, name: partner.name },
+      businessPartner: { id: partner.id, name: partner.name, externalId: partner.externalId },
       reused: Boolean(existing), counterBefore, counterAfter: this.counters[matrixKey] || 0,
       sequencePosition: existing ? null : sequencePosition, sequenceLength: sequence.length,
       weights, fallbackUsed: false,
