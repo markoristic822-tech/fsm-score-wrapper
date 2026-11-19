@@ -9,6 +9,11 @@ const { ServiceCallTechnology } = require("./service-call-technology");
 const { AssignmentContext, registerAssignmentContextRoute } = require("./assignment-context");
 require("dotenv").config();
 
+const SUBCONTRACTOR_ASSIGNMENT_SOURCE = String(process.env.FSM_SUBCONTRACTOR_ASSIGNMENT_SOURCE || 'SIEBEL_VENDOR').trim().toUpperCase();
+if (!['SIEBEL_VENDOR', 'MATRIX'].includes(SUBCONTRACTOR_ASSIGNMENT_SOURCE)) {
+  throw new Error('FSM_SUBCONTRACTOR_ASSIGNMENT_SOURCE must be SIEBEL_VENDOR or MATRIX');
+}
+
 const app = express();
 app.set("trust proxy", true);
 app.use(express.json({ limit: "10mb" }));
@@ -53,9 +58,9 @@ const ALLOCATION_MATRIX_PATH =
   );
 
 const allocationConfig =
-  loadAllocationConfig(
-    ALLOCATION_MATRIX_PATH
-  );
+  SUBCONTRACTOR_ASSIGNMENT_SOURCE === 'MATRIX'
+    ? loadAllocationConfig(ALLOCATION_MATRIX_PATH)
+    : { matrix: {}, contractorCodeMap: {} };
 
 const CONTRACTOR_ALLOCATION_MATRIX =
   allocationConfig.matrix;
@@ -1425,6 +1430,7 @@ app.get("/health", (request, response) => {
   response.json({
     status: "ok",
     service: "fsm-score-wrapper",
+    subcontractorAssignmentSource: SUBCONTRACTOR_ASSIGNMENT_SOURCE,
     allocationCounters
   });
 });
@@ -1476,6 +1482,8 @@ app.post(
 app.post(
   "/score-with-org-level",
   async (request, response) => {
+    let assignment;
+    let matrixKey = null;
     try {
       console.log(
         "Received request from FSM."
@@ -1546,6 +1554,18 @@ app.post(
         );
       }
 
+      if (SUBCONTRACTOR_ASSIGNMENT_SOURCE === "SIEBEL_VENDOR") {
+        try {
+          assignment = await businessPartnerAssignment.fromServiceCall(serviceCall, token);
+          console.log("Service Call Business Partner supplied by Siebel:", {serviceCallId, ...assignment});
+        } catch (error) {
+          return response.json(buildManualDispatchResponse({
+            reason: error.code || "SIEBEL_VENDOR_BUSINESS_PARTNER_LOOKUP_FAILED",
+            serviceCallId, details: {message: error.message}
+          }));
+        }
+      }
+
       const requirementLookup =
         await getRequirementsForServiceCall(
           serviceCallId,
@@ -1562,124 +1582,131 @@ app.post(
         resolvedRequirementSkills
           .mandatorySkills;
 
-      const workOrder = request.body?.workOrder ?? assignmentContexts.read(serviceCall.externalId);
-      console.log("Assignment context source:", {
-        serviceCallId,
-        source: request.body?.workOrder != null ? "DIRECT_REQUEST" : workOrder ? "SOAP_CONTEXT" : "LEGACY"
-      });
-      const hasOteContext = workOrder != null &&
-        !String(workOrder.addressInfo?.postalCode ?? "").trim() &&
-        Boolean(String(workOrder.externalSystemInfo?.oteSiteId ?? "").trim());
+      if (SUBCONTRACTOR_ASSIGNMENT_SOURCE === "MATRIX") {
+        const workOrder = request.body?.workOrder ?? assignmentContexts.read(serviceCall.externalId);
+        console.log("Assignment context source:", {
+          serviceCallId,
+          source: request.body?.workOrder != null ? "DIRECT_REQUEST" : workOrder ? "SOAP_CONTEXT" : "LEGACY"
+        });
+        const hasOteContext = workOrder != null &&
+          !String(workOrder.addressInfo?.postalCode ?? "").trim() &&
+          Boolean(String(workOrder.externalSystemInfo?.oteSiteId ?? "").trim());
 
-      if (
-        mandatorySkills.length === 0 && !hasOteContext
-      ) {
-        if (workOrder != null && !String(workOrder.addressInfo?.postalCode ?? "").trim()) {
+        if (
+          mandatorySkills.length === 0 && !hasOteContext
+        ) {
+          if (workOrder != null && !String(workOrder.addressInfo?.postalCode ?? "").trim()) {
+            console.log("Postal Code and OTE Site ID not provided. No Region fallback is configured; manual dispatch required.");
+          }
+          return response.json(
+            buildManualDispatchResponse({
+              reason:
+                "MANDATORY_SKILLS_UNAVAILABLE",
+              serviceCallId,
+              details: {
+                requirementQueryUsed:
+                  requirementLookup.queryUsed,
+                requirementTagIds:
+                  resolvedRequirementSkills.tagIds,
+                tagLookups:
+                  resolvedRequirementSkills.tagLookups
+              }
+            })
+          );
+        }
+
+        let technology;
+        try {
+          technology = workOrder != null
+            ? String(workOrder.technicalInfo?.technology ?? "").trim()
+            : await serviceCallTechnology.read(serviceCall, token);
+        } catch (error) {
+          return response.json(buildManualDispatchResponse({
+            reason: "SERVICE_CALL_TECHNOLOGY_LOOKUP_FAILED", serviceCallId, mandatorySkills,
+            details: { message: error.message }
+          }));
+        }
+        const routing = resolveAllocationRouting(mandatorySkills, serviceCall, allocationConfig.skillColumnMap, technology, workOrder);
+        matrixKey = routing.matrixKey;
+
+        console.log("Assignment lookup strategy:", {
+          serviceCallId, strategy: routing.strategy,
+          postalCode: routing.postalCode || null,
+          oteSiteId: routing.oteSiteId || null, oteSite: routing.oteSite || null
+        });
+        if (routing.strategy === "OTE_SITE") {
+          console.log("Postal Code not provided. Switching to OTE Site assignment.");
+        } else if (routing.strategy === "NONE") {
           console.log("Postal Code and OTE Site ID not provided. No Region fallback is configured; manual dispatch required.");
         }
-        return response.json(
-          buildManualDispatchResponse({
-            reason:
-              "MANDATORY_SKILLS_UNAVAILABLE",
-            serviceCallId,
-            details: {
-              requirementQueryUsed:
-                requirementLookup.queryUsed,
-              requirementTagIds:
-                resolvedRequirementSkills.tagIds,
-              tagLookups:
-                resolvedRequirementSkills.tagLookups
-            }
-          })
-        );
-      }
 
-      let technology;
-      try {
-        technology = workOrder != null
-          ? String(workOrder.technicalInfo?.technology ?? "").trim()
-          : await serviceCallTechnology.read(serviceCall, token);
-      } catch (error) {
-        return response.json(buildManualDispatchResponse({
-          reason: "SERVICE_CALL_TECHNOLOGY_LOOKUP_FAILED", serviceCallId, mandatorySkills,
-          details: { message: error.message }
-        }));
-      }
-      const routing = resolveAllocationRouting(mandatorySkills, serviceCall, allocationConfig.skillColumnMap, technology, workOrder);
-      const matrixKey = routing.matrixKey;
-
-      console.log("Assignment lookup strategy:", {
-        serviceCallId, strategy: routing.strategy,
-        postalCode: routing.postalCode || null,
-        oteSiteId: routing.oteSiteId || null, oteSite: routing.oteSite || null
-      });
-      if (routing.strategy === "OTE_SITE") {
-        console.log("Postal Code not provided. Switching to OTE Site assignment.");
-      } else if (routing.strategy === "NONE") {
-        console.log("Postal Code and OTE Site ID not provided. No Region fallback is configured; manual dispatch required.");
-      }
-
-      console.log("Contractor allocation routing:", {
-        serviceCallId,
-        serviceCallExternalId: serviceCall.externalId || null,
-        ...routing
-      });
-
-      if (routing.reason) {
-        return response.json(
-          buildManualDispatchResponse({
-            reason: routing.reason,
-            serviceCallId,
-            mandatorySkills,
-            details: routing
-          })
-        );
-      }
-
-      console.log(
-        "Contractor matrix key:",
-        matrixKey
-      );
-
-      if (
-        !CONTRACTOR_ALLOCATION_MATRIX[
-          matrixKey
-        ]
-      ) {
-        if (routing.strategy === "OTE_SITE") {
-          console.log("No usable OTE Site matrix entry found:", { oteSiteId: routing.oteSiteId, matrixKey });
-        }
-        return response.json(
-          buildManualDispatchResponse({
-            reason:
-              allocationConfig.invalidMatrixKeys?.[matrixKey]
-                ? "ALLOCATION_MATRIX_INVALID_WEIGHT"
-                : "ALLOCATION_MATRIX_NOT_CONFIGURED",
-            serviceCallId,
-            matrixKey,
-            mandatorySkills
-          })
-        );
-      }
-
-      let assignment;
-      try {
-        assignment = await businessPartnerAssignment.assign(serviceCallId, matrixKey, token);
-        assignment.lookupStrategy = routing.strategy;
-        console.log("Service Call Business Partner assignment:", { serviceCallId, ...assignment });
-        if (routing.strategy === "OTE_SITE") {
-          console.log("OTE Site matrix match found:", {
-            oteSiteId: routing.oteSiteId, matrixKey,
-            businessPartner: assignment.businessPartner.id, subcontractor: assignment.selectedContractor
-          });
-        }
-      } catch (error) {
-        console.error("Service Call Business Partner assignment failed:", {
-          serviceCallId, matrixKey, message: error.message
+        console.log("Contractor allocation routing:", {
+          serviceCallId,
+          serviceCallExternalId: serviceCall.externalId || null,
+          ...routing
         });
+
+        if (routing.reason) {
+          return response.json(
+            buildManualDispatchResponse({
+              reason: routing.reason,
+              serviceCallId,
+              mandatorySkills,
+              details: routing
+            })
+          );
+        }
+
+        console.log(
+          "Contractor matrix key:",
+          matrixKey
+        );
+
+        if (
+          !CONTRACTOR_ALLOCATION_MATRIX[
+            matrixKey
+          ]
+        ) {
+          if (routing.strategy === "OTE_SITE") {
+            console.log("No usable OTE Site matrix entry found:", { oteSiteId: routing.oteSiteId, matrixKey });
+          }
+          return response.json(
+            buildManualDispatchResponse({
+              reason:
+                allocationConfig.invalidMatrixKeys?.[matrixKey]
+                  ? "ALLOCATION_MATRIX_INVALID_WEIGHT"
+                  : "ALLOCATION_MATRIX_NOT_CONFIGURED",
+              serviceCallId,
+              matrixKey,
+              mandatorySkills
+            })
+          );
+        }
+
+        try {
+          assignment = await businessPartnerAssignment.assign(serviceCallId, matrixKey, token);
+          assignment.lookupStrategy = routing.strategy;
+          console.log("Service Call Business Partner assignment:", { serviceCallId, ...assignment });
+          if (routing.strategy === "OTE_SITE") {
+            console.log("OTE Site matrix match found:", {
+              oteSiteId: routing.oteSiteId, matrixKey,
+              businessPartner: assignment.businessPartner.id, subcontractor: assignment.selectedContractor
+            });
+          }
+        } catch (error) {
+          console.error("Service Call Business Partner assignment failed:", {
+            serviceCallId, matrixKey, message: error.message
+          });
+          return response.json(buildManualDispatchResponse({
+            reason: error.code || "BUSINESS_PARTNER_ASSIGNMENT_FAILED",
+            serviceCallId, matrixKey, mandatorySkills, details: { message: error.message }
+          }));
+        }
+
+      } else if (mandatorySkills.length === 0) {
         return response.json(buildManualDispatchResponse({
-          reason: error.code || "BUSINESS_PARTNER_ASSIGNMENT_FAILED",
-          serviceCallId, matrixKey, mandatorySkills, details: { message: error.message }
+          reason: "MANDATORY_SKILLS_UNAVAILABLE", serviceCallId,
+          details: {assignment, requirementQueryUsed: requirementLookup.queryUsed}
         }));
       }
 
@@ -1997,6 +2024,7 @@ app.post(
             null,
           details: {
             message: error.message,
+            assignment,
             upstreamStatus:
               error.response?.status ||
               null

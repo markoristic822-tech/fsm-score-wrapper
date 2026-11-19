@@ -26,6 +26,13 @@ async function score(externalId, skills, options = {}) {
   const axios = {
     async get(url) {
       reads.push(url);
+      if (url.includes('/BusinessPartner/bp-vendor?')) {
+        if (options.partnerLookupError) throw new Error('BP unavailable');
+        return {data: {data: [{businessPartner: {
+          id: 'bp-vendor', name: options.businessPartnerDisplayName || 'Siebel Vendor',
+          externalId: options.businessPartnerName || 'DIMOU_L_DIS', inactive: options.inactivePartner === true
+        }}]}};
+      }
       if (url.includes('/UdfMeta?')) {
         if (options.metadataError) throw new Error("Metadata unavailable");
         return { data: { data: [{ udfMeta: { id: "technology-meta", externalId: "DIS_SC_TECHNOLOGY" } }] } };
@@ -45,8 +52,9 @@ async function score(externalId, skills, options = {}) {
     },
     async post(url, payload) {
       assert.equal(url, "https://optimization.test");
-      assert.equal(bpUpdates.length, 1);
+      assert.equal(bpUpdates.length, ['SIEBEL_VENDOR', 'DEFAULT'].includes(options.assignmentSource) ? 0 : 1);
       optimizationRequests.push(payload);
+      if (options.optimizationError) throw new Error('Optimization unavailable');
       if (options.noResults) return { data: { results: [] } };
       const slot = payload.slots[0];
       return { data: { results: [{
@@ -61,6 +69,8 @@ async function score(externalId, skills, options = {}) {
   env.FSM_BASE_URL = "https://fsm.test";
   env.OPTIMIZATION_URL = "https://optimization.test";
   env.ASSIGNMENT_CONTEXT_KEY = "test-context-key";
+  if (options.assignmentSource !== 'DEFAULT') env.FSM_SUBCONTRACTOR_ASSIGNMENT_SOURCE = options.assignmentSource || 'MATRIX';
+  if (['SIEBEL_VENDOR', 'DEFAULT'].includes(options.assignmentSource)) env.ALLOCATION_MATRIX_PATH = 'matrix-must-not-be-read.json';
   const context = vm.createContext({
     require(name) {
       if (name === "express") return express;
@@ -71,12 +81,12 @@ async function score(externalId, skills, options = {}) {
     __dirname: root,
     console: { log(...args) { logs.push(args); }, error(...args) { logs.push(args); } },
     process: { env, on() {}, exit() { throw new Error("Unexpected exit"); } },
-    fixture: { externalId, skills, contractor: options.contractor || "DIMOU_L_DIS", udfValues: options.udfValues || [] }
+    fixture: { externalId, skills, contractor: options.contractor || "DIMOU_L_DIS", udfValues: options.udfValues || [], businessPartner: options.existingBusinessPartner }
   });
   vm.runInContext(fs.readFileSync(path.join(root, "server.js"), "utf8"), context);
   vm.runInContext(`
     getFsmToken = async () => "test-token";
-    getServiceCall = async () => ({ id: "sc-1", externalId: fixture.externalId, lastChanged: 123, udfValues: fixture.udfValues });
+    getServiceCall = async () => ({ id: "sc-1", externalId: fixture.externalId, lastChanged: 123, udfValues: fixture.udfValues, businessPartner: fixture.businessPartner });
     getFirstItem = (value) => value;
     unwrapServiceCall = (value) => value;
     getRequirementsForServiceCall = async () => ({ response: {}, queryUsed: "test" });
@@ -290,4 +300,56 @@ test("a context registered for another externalId cannot affect assignment", asy
   });
   assert.equal(result.fallbackReason, "POSTAL_CODE_UNAVAILABLE");
   assert.equal(bpUpdates.length, 0);
+});
+
+
+test("default vendor mode uses the SC BP without matrix, OTE, initiator or technology lookup", async () => {
+  const {result, bpUpdates, reads} = await score("123456", ["FWA"], {
+    assignmentSource: 'DEFAULT', existingBusinessPartner: 'bp-vendor',
+    businessPartnerName: 'SAT_PRAXIS_DIS', businessPartnerDisplayName: 'SAT PRAXIS LTD',
+    contractor: 'SAT_PRAXIS_DIS', metadataError: true
+  });
+  assert.equal(result.results[0].contractor, 'SAT_PRAXIS_DIS');
+  assert.equal(result.results[0].actSubContractorName, 'SAT PRAXIS LTD');
+  assert.equal(result.results[0].businessPartner, 'bp-vendor');
+  assert.equal(result.businessPartnerAssignment.reason, 'SIEBEL_VENDOR');
+  assert.equal(result.allocation.matrixKey, null);
+  assert.deepEqual(bpUpdates, []);
+  assert.equal(reads.some(url => url.includes('/UdfMeta') || url.includes('/BusinessPartner?')), false);
+});
+
+test("vendor mode with missing or inactive BP does not fall back to the matrix", async () => {
+  for (const [options, reason] of [
+    [{}, 'SIEBEL_VENDOR_BUSINESS_PARTNER_MISSING'],
+    [{existingBusinessPartner: 'bp-vendor', inactivePartner: true}, 'SIEBEL_VENDOR_BUSINESS_PARTNER_INVALID'],
+    [{existingBusinessPartner: 'bp-vendor', partnerLookupError: true}, 'SIEBEL_VENDOR_BUSINESS_PARTNER_LOOKUP_FAILED']
+  ]) {
+    const {result, bpUpdates, optimizationRequests} = await score('TAS123', ['19442'], {assignmentSource:'SIEBEL_VENDOR', ...options});
+    assert.equal(result.fallbackReason, reason);
+    assert.deepEqual(bpUpdates, []);
+    assert.deepEqual(optimizationRequests, []);
+  }
+});
+
+test("vendor remains on manual-dispatch responses when skills or optimization results are unavailable", async () => {
+  for (const options of [{skills:[]}, {noResults:true}, {optimizationError:true}]) {
+    const {result, bpUpdates} = await score('PS123', options.skills || ['FTTH'], {
+      assignmentSource:'SIEBEL_VENDOR', existingBusinessPartner:{id:'bp-vendor'}, ...options
+    });
+    assert.equal(result.manualDispatchRequired, true);
+    assert.equal(result.results[0].businessPartner, 'bp-vendor');
+    assert.equal(result.results[0].contractor, 'DIMOU_L_DIS');
+    assert.deepEqual(bpUpdates, []);
+  }
+});
+
+test("a resource belonging to another subcontractor cannot replace the Siebel vendor", async () => {
+  const {result, bpUpdates} = await score('PS123', ['FTTH'], {
+    assignmentSource:'SIEBEL_VENDOR', existingBusinessPartner:'bp-vendor',
+    businessPartnerName:'SAT_PRAXIS_DIS', contractor:'DIMOU_L_DIS'
+  });
+  assert.equal(result.fallbackReason, 'NO_RESOURCE_FOR_SELECTED_SUBCONTRACTOR');
+  assert.equal(result.results[0].contractor, 'SAT_PRAXIS_DIS');
+  assert.equal(result.results[0].businessPartner, 'bp-vendor');
+  assert.deepEqual(bpUpdates, []);
 });

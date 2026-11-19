@@ -34,6 +34,32 @@ class BusinessPartnerAssignment {
       .filter((partner) => partner?.id && partner.externalId === externalId);
   }
 
+  // SOAP persists the vendor's BP on creation. Reuse that link without matrix
+  // lookup, quota consumption, or a Service Call PATCH.
+  async fromServiceCall(serviceCall, token) {
+    const id = serviceCall?.businessPartner?.id || serviceCall?.businessPartner;
+    if (typeof id !== 'string' || !id.trim()) {
+      throw failure('SIEBEL_VENDOR_BUSINESS_PARTNER_MISSING', 'Service Call has no Business Partner supplied by Siebel vendor');
+    }
+    const url = `${this.baseUrl}/api/data/v4/BusinessPartner/${encodeURIComponent(id)}?dtos=${encodeURIComponent(this.businessPartnerDto)}`;
+    const response = await this.client.get(url, { headers: this.headers(token) });
+    const rows = response.data?.data;
+    if (!Array.isArray(rows) || rows.length !== 1 || response.data.truncated) {
+      throw failure('BUSINESS_PARTNER_RESPONSE_INVALID', 'Linked Business Partner could not be uniquely loaded');
+    }
+    const partner = rows[0].businessPartner;
+    if (partner?.id !== id || partner.inactive === true || !String(partner.externalId || '').trim()) {
+      throw failure('SIEBEL_VENDOR_BUSINESS_PARTNER_INVALID', 'Linked Business Partner must be active and have an externalId');
+    }
+    return {
+      matrixKey: null, selectedContractor: partner.externalId, preferredContractor: partner.externalId,
+      businessPartner: {id: partner.id, name: partner.name, externalId: partner.externalId},
+      reused: true, counterBefore: null, counterAfter: null,
+      sequencePosition: null, sequenceLength: null, weights: null, fallbackUsed: false,
+      lookupStrategy: 'SIEBEL_VENDOR', reason: 'SIEBEL_VENDOR'
+    };
+  }
+
   async assignNow(serviceCallId, matrixKey, token) {
     const weights = this.matrix[matrixKey];
     const sequence = this.sequences[matrixKey];

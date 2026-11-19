@@ -1,5 +1,32 @@
 ﻿# Subcontractor allocation and Service Call customer
 
+## Subcontractor supplied by Siebel
+
+The default `FSM_SUBCONTRACTOR_ASSIGNMENT_SOURCE=SIEBEL_VENDOR` uses the
+Business Partner already linked to the Service Call by the SOAP middleware
+from `CreateWorkOrderFieldsRequest.vendor`. The score service reads that BP by
+ID, validates that it is active and has an external ID, and uses its external ID
+as the contractor code for resource selection. It does not read the allocation
+matrix, calculate percentages, consume quotas, or PATCH the Service Call BP.
+Postal code, OTE, technology and PS/TAS prefixes no longer select a contractor.
+Skills and Optimization still select a resource within the supplied contractor.
+
+A missing/invalid BP returns manual dispatch; it never falls back to a matrix
+contractor. Missing skills, no available resource or an Optimization error also
+return manual dispatch, retaining a valid supplied BP in the response.
+The endpoint `/score-with-org-level` and response shape remain compatible with
+the existing FSM Business Rule. `/health` exposes `subcontractorAssignmentSource`.
+In vendor mode `/allocation/status` has empty matrix, sequences and counters.
+
+Legacy matrix allocation remains available by explicitly setting
+`FSM_SUBCONTRACTOR_ASSIGNMENT_SOURCE=MATRIX` on both SOAP and score services
+and redeploying. The matrix documentation below describes that legacy mode.
+For the change to vendor assignment, deploy this score service before SOAP;
+during the transition old SOAP orders without a BP require manual dispatch.
+Do not deploy SOAP vendor assignment while the score service still allocates
+from the matrix. No existing orders are automatically reassigned.
+
+
 The allocation source is `Assignment Flows 7_5 (3).xlsx`. The checked-in
 `matrix.xlsx` contains its **POSTAL CODE FLOW** and **OTE SITE FLOW** sheets,
 which the existing `xlsx` generator selects by trimmed sheet name, independent
